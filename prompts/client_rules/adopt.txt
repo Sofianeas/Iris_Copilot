@@ -1,0 +1,16 @@
+Règles de mapping précises pour ce client (ADOPT) :
+
+- "intervention.type" : utilise la valeur du champ du mail "Type de demande" 
+  si présent (ex: "Maintenance", "Installation"). Ne mets JAMAIS le nom du 
+  client ici.
+
+- "intervention.type_ticket" : utilise UNIQUEMENT "Incident" (si le mail 
+  décrit une panne, un dysfonctionnement) ou "Demande" (si le mail décrit 
+  une installation, un ajout de matériel neuf). Ne mets JAMAIS le nom du 
+  client ici.
+
+- "intervention.problematique" : copie le texte du champ "Intitulé de la 
+  demande" du mail, sans le reformuler.
+
+- "customer.enseigne" : pour ce client, l'enseigne est toujours "ADOPT", 
+  sauf mention contraire explicite dans le mail.

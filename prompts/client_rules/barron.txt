@@ -1,0 +1,4 @@
+Si le mail contient un champ "Barron McCann Reference" (en plus de "Customer Ref"), 
+mets la valeur de "Barron McCann Reference" dans le champ JSON "code_projet", 
+et mets la valeur de "Customer Ref" dans "numero_incident_client".
+Ne duplique jamais ces informations entre elles.
