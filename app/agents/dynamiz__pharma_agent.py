@@ -117,6 +117,7 @@ SEQUENCE_LABELS = [
     ("type_demande", r"intitul[ée] de la demande"),
     ("description", r"description de la demande"),
     ("numero_incident_client", r"num[ée]ro incident client"),
+    ("_section_site_intervention", r"site d'intervention"),
     ("code_site_champ", r"\bcode site\b"),
     ("adresse", r"\badresse\b"),
     ("cp_ville", r"\bcp\s*:"),
@@ -283,9 +284,11 @@ def enrich_ticket(ticket: Ticket, texte_source: str = "", fichier_excel=None) ->
     ticket.customer.enseigne = enseigne
     ticket.customer.adresse = champs.get("adresse", "")
 
-    code_postal, ville = extraire_cp_ville(champs.get("cp_ville", ""))
+    code_postal, ville = extraire_cp_ville(texte_source)
     ticket.customer.code_postal = code_postal
     ticket.customer.ville = ville
+    if not code_postal or not ville:
+        notes.append("CP/Ville introuvable(s) (champ 'CP: ... VILLE: ...' attendu sur une seule ligne) — à compléter manuellement.")
 
     ticket.customer.nom = champs.get("contact_site", "")
     ticket.customer.fixe = champs.get("telephone", "")

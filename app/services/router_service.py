@@ -5,7 +5,7 @@ pour que l'extraction utilise un prompt adapté à ce client.
 
 from app.models.ticket import Ticket
 from app.services.parser_service import traiter_mail as extraire_ticket_brut
-from app.agents import barron_agent, adopt_agent, aemsoft_agent, amplifon_agent
+from app.agents import barron_agent, adopt_agent, aemsoft_agent, amplifon_agent, but_agent, innovorder_agent, pos_service_agent, shoppertrak_agent
 
 
 AGENTS_DISPONIBLES = {
@@ -13,6 +13,10 @@ AGENTS_DISPONIBLES = {
     "ADOPT": adopt_agent.enrich_ticket,
     "AEMSOFT": aemsoft_agent.enrich_ticket,
     "AMPLIFON": amplifon_agent.enrich_ticket,
+    "BUT": but_agent.enrich_ticket,
+    "INNOVORDER": innovorder_agent.enrich_ticket,
+    "POS_SERVICE": pos_service_agent.enrich_ticket,
+    "SHOPPERTRAK": shoppertrak_agent.enrich_ticket,
 }
 
 
@@ -46,6 +50,32 @@ def detecter_client(texte_mail: str) -> str:
     ]
     if any(signature in texte_lower for signature in signatures_aemsoft):
         return "AEMSOFT"
+
+    # NB : placé AVANT AMPLIFON volontairement -- AMPLIFON détecte "epson"/
+    # "ricoh", qui peuvent aussi apparaître dans un mail BUT (imprimante
+    # Epson TMH-6000) : BUT doit être vérifié en premier pour éviter ce
+    # faux positif.
+    signatures_but = [
+        "magasin but", "support but", "dsi but",
+        "hp rp9", "ecran client saga", "tm-h6000", "tmh6000", "tmh-6000",
+    ]
+    if any(signature in texte_lower for signature in signatures_but):
+        return "BUT"
+
+    signatures_innovorder = [
+        "innovorder", "numero d'incident innovorder", "numéro d'incident innovorder",
+        "problematique constate sur site", "problématique constaté sur site",
+    ]
+    if any(signature in texte_lower for signature in signatures_innovorder):
+        return "INNOVORDER"
+
+    signatures_pos_service = ["pos service", "maxizoo", "maxi zoo", "geox"]
+    if any(signature in texte_lower for signature in signatures_pos_service):
+        return "POS_SERVICE"
+
+    signatures_shoppertrak = ["shoppertrak", "diogo lopes", "sensormatic"]
+    if any(signature in texte_lower for signature in signatures_shoppertrak):
+        return "SHOPPERTRAK"
 
     # NB : pas de libellé de champ unique commun aux 4 modèles AMPLIFON
     # (contrairement aux autres clients) -> détection plus fragile, basée
