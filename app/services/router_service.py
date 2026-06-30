@@ -6,6 +6,9 @@ pour que l'extraction utilise un prompt adapté à ce client.
 from app.models.ticket import Ticket
 from app.services.parser_service import traiter_mail as extraire_ticket_brut
 from app.agents import barron_agent, adopt_agent, aemsoft_agent, amplifon_agent, but_agent, innovorder_agent, pos_service_agent, shoppertrak_agent
+# Agents à signature différente -- NE PAS ajouter à AGENTS_DISPONIBLES, voir
+# traiter_fichier_complet() ci-dessous pour l'explication et le dispatch dédié.
+from app.agents import axe_esante_agent, etam_agent, dynamiz_pharma_agent, promethean_agent
 
 
 AGENTS_DISPONIBLES = {
@@ -77,6 +80,23 @@ def detecter_client(texte_mail: str) -> str:
     if any(signature in texte_lower for signature in signatures_shoppertrak):
         return "SHOPPERTRAK"
 
+    # --- Clients à signature différente (fichier/texte-brut), cf.
+    # traiter_fichier_complet() -- la détection reste ici car utile à l'UI
+    # (savoir quel type de pièce jointe demander), même si le dispatch
+    # d'enrichissement est séparé.
+    if "diffme21" in texte_lower:
+        return "AXE_ESANTE"
+
+    signatures_etam = ["akkodis", "dossier akkodis", "sav akkodis vers iris"]
+    if any(signature in texte_lower for signature in signatures_etam):
+        return "ETAM"
+
+    if "dynamiz" in texte_lower:
+        return "DYNAMIZ_PHARMA"
+
+    if promethean_agent.est_mail_promethean(texte_mail):
+        return "PROMETHEAN"
+
     # NB : pas de libellé de champ unique commun aux 4 modèles AMPLIFON
     # (contrairement aux autres clients) -> détection plus fragile, basée
     # sur le nom d'enseigne + les mots-clés du modèle imprimante (D).
@@ -114,3 +134,58 @@ def traiter_mail_complet(texte_mail: str) -> Ticket:
     ticket = agent_enrich_fn(ticket, texte_mail=texte_mail)
 
     return ticket
+
+
+def traiter_fichier_complet(texte_mail: str, fichier=None) -> Ticket:
+    """
+    Pipeline pour les clients dont la source de vérité est un FICHIER
+    (Excel) ou un texte brut analysé par regex -- PAS le pipeline standard
+    Gemini : AXE E-SANTE, ETAM (Excel obligatoire dans les 2 cas) et
+    DYNAMIZ PHARMA (texte du mail et/ou Excel aplati en texte).
+
+    Contrairement à traiter_mail_complet(), AUCUN appel à extraire_ticket_brut
+    (Gemini) n'est fait ici : chaque agent lit lui-même, de façon
+    déterministe, le fichier ou le texte -- c'est déjà l'extraction.
+
+    Les 3 agents ayant des signatures différentes (cf. AGENTS_DISPONIBLES),
+    le dispatch est explicite plutôt que via un dict générique.
+    """
+    client_detecte = detecter_client(texte_mail)
+    ticket = Ticket()
+
+    if client_detecte == "AXE_ESANTE":
+        if fichier is None:
+            raise ValueError(
+                "AXE E-SANTE nécessite la pièce jointe Excel ('demande.xlsx') -- "
+                "aucun fichier fourni. Le PDF 'fiche d'intervention' n'est PAS "
+                "à passer ici (pas de lecture nécessaire, à attacher tel quel)."
+            )
+        return axe_esante_agent.enrich_ticket_depuis_excel(ticket, fichier, texte_mail=texte_mail)
+
+    if client_detecte == "ETAM":
+        if fichier is None:
+            raise ValueError("ETAM nécessite la pièce jointe Excel -- aucun fichier fourni.")
+        return etam_agent.enrich_ticket_depuis_fichier(ticket, fichier, texte_mail=texte_mail)
+
+    if client_detecte == "DYNAMIZ_PHARMA":
+        # fichier optionnel ici : DYNAMIZ PHARMA fonctionne sur texte_mail
+        # seul, sur fichier_excel seul, ou sur les deux combinés.
+        return dynamiz_pharma_agent.enrich_ticket(ticket, texte_source=texte_mail, fichier_excel=fichier)
+
+    if client_detecte == "PROMETHEAN":
+        raise NotImplementedError(
+            "PROMETHEAN détecté, mais ce client nécessite une navigation web "
+            "(connexion + lecture de la page Promethean) non encore automatisée "
+            "(V3). Traiter manuellement via TOKI_PROMETHEAN.txt pour l'instant."
+        )
+
+    if client_detecte in AGENTS_DISPONIBLES:
+        raise ValueError(
+            f"Client '{client_detecte}' détecté, mais c'est un client texte-seul "
+            f"-- utiliser traiter_mail_complet() plutôt que traiter_fichier_complet()."
+        )
+
+    raise ValueError(
+        "Client non reconnu dans ce mail/fichier. "
+        "Vérifie le contenu ou ajoute ses signatures dans detecter_client()."
+    )

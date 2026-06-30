@@ -14,8 +14,39 @@ Logique métier issue de AEMSOFT.docx + TOKI_AEM_SOFT.txt :
 - Durée par défaut : 1h (moyenne TOKI), sauf mention switch/serveur -> 3h.
 - Travail attendu et Consignes de planification sont enrichis (jamais remplacés,
   idempotent) avec : le contenu INSTRUCTION TECH (= Problématique), le tracking
-  UPS, le matériel envoyé par le client, et le rappel ATTENTION (support AEM,
-  bon de retour, photos, contact Amine) — source : TOKI_AEM_SOFT.txt.
+  UPS, le matériel envoyé par le client, la Hotline AEM (numéro dynamique du
+  mail si présent, sinon rappel générique), et le rappel ATTENTION (support
+  AEM, bon de retour, photos, contact Amine) — source : TOKI_AEM_SOFT.txt.
+
+⚠️ PIÈCE JOINTE PDF : AEM SOFT envoie aussi un PDF "Bon de commande
+   d'intervention" qui duplique le contenu du mail. Ce PDF n'est PAS parsé
+   par cet agent (texte_mail reste l'unique source) : un exemple réel a
+   montré que l'extraction texte d'un PDF de ce type insère des artefacts
+   de mise en page au milieu du texte utile (en-têtes de tableau, numéros
+   de page, ex. "DATE: ... DQ-027 Bon de commande fournisseur PAGE: 1 ...
+   Ref. fourni. Désignation QTE COMMANDEE ...") qui rendraient toute regex
+   fragile. Le PDF doit simplement être attaché tel quel au ticket
+   (Documents), jamais lu — même logique que la "fiche d'intervention" PDF
+   d'AXE E-SANTE.
+
+--- Corrections apportées après analyse d'un vrai mail AEM SOFT ---
+  1. RE_TYPE_LIGNE tolère désormais un tiret collé après le ':' (format
+     réel observé : "Type :-Intervention J+1", sans espace avant le "-").
+  2. `extraire_materiel_envoye_ups` capture maintenant TOUTES les lignes
+     d'une liste à puces multi-lignes (bug corrigé : seule la 1ère ligne
+     était récupérée, les suivantes silencieusement perdues).
+  3. Le sous-type est désormais classifié par MOTS-CLÉS
+     (`classifier_sous_type`) plutôt que par égalité stricte : un vrai mail
+     contenait "Intervention Avec pièce Expédié par AEM" (singulier, accord
+     masculin) alors que le libellé canonique du docx est au pluriel/accord
+     féminin -- la comparaison stricte échouait sur ce cas réel pourtant
+     valide.
+  4. 3 champs supplémentaires, observés sur le terrain mais absents
+     d'AEMSOFT.docx/TOKI, sont désormais extraits : N° TPV (->
+     `reference_materiel_client`), "RETOUR COLIS PAR UPS : OUI/NON" (->
+     `logistics.retour_piece`), et le numéro de Hotline AEM SOFTS
+     spécifique à l'intervention (différent du contact générique "Amine"
+     déjà codé en dur) -> ajouté dans `travail_attendu`.
 
 ⚠️ Hypothèses à vérifier (non documentées explicitement, ou en contradiction
    entre les deux sources) :
@@ -31,7 +62,16 @@ Logique métier issue de AEMSOFT.docx + TOKI_AEM_SOFT.txt :
      par Pivot (NIVEAU_SERVICE_GTI_1J ci-dessous).
   4. `ticket.intervention.intitule` est supposé contenir, avant cet agent, le
      texte brut du champ mail "Objet de l'intervention" (extraction Gemini) ->
-     si ce n'est pas le cas, adapter `construire_intitule`.
+     si ce n'est pas le cas, adapter `construire_intitule`. NB : un vrai mail
+     n'a montré aucune mention explicite de "BDC" dans le corps -- ce numéro
+     est censé provenir de l'objet du mail (non visible dans cet exemple) ;
+     si "BDC" s'avère absent même dans l'objet pour ce type de commande, le
+     repli actuel (garder l'objet tel quel sans préfixe "BDC X –") reste correct.
+  5. La position exacte de "N° TPV" dans le mail (juste après INSTRUCTION TECH,
+     avant OUTILS A PREVOIR) fait qu'il reste aussi inclus tel quel dans la
+     Problématique copiée verbatim (conforme à la règle "copier tout INSTRUCTION
+     TECH") -- son extraction séparée vers reference_materiel_client est un
+     AJOUT pour la traçabilité, pas un remplacement.
 """
 
 import re
@@ -68,7 +108,6 @@ NIVEAU_SERVICE_GTI_1J = "GTI 1J (5/7)"  # cf. hypothèse 3 du docstring (GTI vs 
 SOUS_TYPE_AEM = "Intervention AVEC pièces expédiées par AEM"
 SOUS_TYPE_IRIS = "Intervention AVEC pièces expédiées par IRIS"
 SOUS_TYPE_SANS_PIECE = "Intervention SANS pièces"
-SOUS_TYPES_CONNUS = (SOUS_TYPE_AEM, SOUS_TYPE_IRIS, SOUS_TYPE_SANS_PIECE)
 
 CONTRAT_AEMSOFT = ""  # TODO : libellé Pivot non documenté, voir hypothèse 1 du docstring
 
@@ -93,15 +132,25 @@ CONSIGNE_PLANIFICATION_STANDARD = (
 
 RE_BDC = re.compile(r"\bBDC\b\s*[:\-n°]*\s*(\d+)", re.IGNORECASE)
 RE_TRACKING_UPS = re.compile(r"lien de suivi du colis ups\s*[:\-]?\s*(\S+)", re.IGNORECASE)
-RE_MATERIEL_UPS = re.compile(r"mat[ée]riel envoy[ée] par ups\s*:?\s*(.+)", re.IGNORECASE)
+RE_MATERIEL_UPS = re.compile(
+    r"mat[ée]riel envoy[ée] par ups\s*:?\s*\n?(.*?)(?:\n\s*-{3,}|\n\s*type\s*:|\n\s*sous-type\s*:|\n\s*\n\s*\n|$)",
+    re.IGNORECASE | re.DOTALL,
+)
 RE_OUTILS_A_PREVOIR = re.compile(r"outils?\s+[aà]\s+pr[ée]voir\s*:?\s*(.+)", re.IGNORECASE)
 RE_TYPE_LIGNE = re.compile(
-    r"(?im)^\s*type\s*:?\s*(intervention\s+(?:j\s*\+\s*1|date\s+impos[ée]e))\s*$"
+    r"(?im)^\s*type\s*:?\s*-?\s*(intervention\s+(?:j\s*\+\s*1|date\s+impos[ée]e))\s*$"
 )
 RE_INSTRUCTION_TECH = re.compile(
     r"instruction\s+tech\s*:?\s*(.+?)(?:\n\s*\n|lien de suivi|mat[ée]riel envoy|outils?\s+[aà]\s+pr[ée]voir|$)",
     re.IGNORECASE | re.DOTALL,
 )
+# Champs supplémentaires découverts sur un vrai mail (non documentés dans
+# AEMSOFT.docx/TOKI -- présents sur le terrain, à conserver pour traçabilité).
+RE_NUMERO_TPV = re.compile(r"n[°o]\s*tpv\s*:?\s*(\S+)", re.IGNORECASE)
+RE_RETOUR_COLIS_UPS = re.compile(r"retour colis par ups\s*:?\s*(oui|non)", re.IGNORECASE)
+RE_ETIQUETTE_RETOUR = re.compile(r"[ée]tiquette retour[^)\n]*", re.IGNORECASE)
+RE_HOTLINE_ARRIVEE = re.compile(r"appeler le\s*:?\s*([\d.\s]{8,15}?)\s*\(hotline aem softs?\)", re.IGNORECASE)
+RE_HORAIRE_HOTLINE = re.compile(r"horaire de la hotline aem softs?\s*:?\s*([^\n]+)", re.IGNORECASE)
 
 
 # --------------------------------------------------------------------------
@@ -130,11 +179,19 @@ def extraire_tracking_ups(texte_mail: str) -> str:
 
 
 def extraire_materiel_envoye_ups(texte_mail: str) -> str:
-    """Matériel envoyé par le client, champ 'Matériel envoyé par UPS :'."""
+    """
+    Matériel envoyé par le client, champ 'Matériel envoyé par UPS :'.
+    Capture TOUTES les lignes de la liste à puces (corrige un bug où seule
+    la 1ère ligne était récupérée -- observé sur un vrai mail à 3 lignes
+    de matériel : les 2 dernières étaient silencieusement perdues).
+    """
     if not texte_mail:
         return ""
     match = RE_MATERIEL_UPS.search(texte_mail)
-    return match.group(1).splitlines()[0].strip() if match else ""
+    if not match:
+        return ""
+    lignes = [l.strip() for l in match.group(1).splitlines() if l.strip()]
+    return "\n".join(lignes)
 
 
 def extraire_outils_a_prevoir(texte_mail: str) -> str:
@@ -175,6 +232,50 @@ def extraire_instruction_tech(texte_mail: str) -> str:
     return " ".join(match.group(1).split()) if match else ""
 
 
+def extraire_numero_tpv(texte_mail: str) -> str:
+    """N° TPV concerné (ex. 'N° TPV : 2') -- champ observé sur un vrai mail, non documenté dans AEMSOFT.docx."""
+    if not texte_mail:
+        return ""
+    match = RE_NUMERO_TPV.search(texte_mail)
+    return match.group(1).strip() if match else ""
+
+
+def extraire_retour_colis_ups(texte_mail: str) -> tuple[str, str]:
+    """
+    'RETOUR COLIS PAR UPS : OUI/NON' -> (retour_piece, note). AEMSOFT.docx
+    laisse ce champ "à décider selon le besoin réel" sans préciser de
+    source -- cette ligne, quand présente dans le mail, est une source
+    fiable et explicite. Retourne ("", "") si absente du mail.
+    """
+    if not texte_mail:
+        return "", ""
+    match = RE_RETOUR_COLIS_UPS.search(texte_mail)
+    if not match:
+        return "", ""
+    valeur = "Oui" if match.group(1).lower() == "oui" else "Non"
+    if valeur == "Oui":
+        m_etiquette = RE_ETIQUETTE_RETOUR.search(texte_mail)
+        detail = f" ({m_etiquette.group(0).strip()})" if m_etiquette else ""
+        return valeur, f"Retour colis UPS confirmé dans le mail{detail}."
+    return valeur, "Retour colis UPS : Non (confirmé dans le mail)."
+
+
+def extraire_hotline_aem(texte_mail: str) -> tuple[str, str]:
+    """
+    Numéro de la Hotline AEM SOFTS à appeler à l'arrivée sur site (+
+    horaires si présents). Ce numéro est SPÉCIFIQUE à chaque mail
+    (contrairement au contact générique "Amine" du rappel ATTENTION_AEM,
+    fixe) -- à privilégier quand présent. Retourne ("", "") si absent.
+    """
+    if not texte_mail:
+        return "", ""
+    match_numero = RE_HOTLINE_ARRIVEE.search(texte_mail)
+    numero = match_numero.group(1).strip() if match_numero else ""
+    match_horaire = RE_HORAIRE_HOTLINE.search(texte_mail)
+    horaire = match_horaire.group(1).strip() if match_horaire else ""
+    return numero, horaire
+
+
 # --------------------------------------------------------------------------
 # Helpers de déduction / construction
 # --------------------------------------------------------------------------
@@ -192,7 +293,29 @@ def deduire_niveau_service(type_intervention: str) -> str:
 
 def besoin_materiel_ok(sous_type: str) -> bool:
     """Besoin de matériel = Oui uniquement si pièces expédiées par IRIS."""
-    return _normaliser(sous_type) == _normaliser(SOUS_TYPE_IRIS)
+    return classifier_sous_type(sous_type) == SOUS_TYPE_IRIS
+
+
+def classifier_sous_type(sous_type: str) -> str:
+    """
+    Classifie un sous-type en l'un des 3 connus (AEM/IRIS/SANS pièce) par
+    MOTS-CLÉS plutôt que par correspondance exacte. Correctif : la
+    formulation varie dans les mails réels (singulier/pluriel, accord) --
+    ex. observé : "Intervention Avec pièce Expédié par AEM" (singulier,
+    accord masculin) vs. le libellé canonique du docx "Intervention AVEC
+    pièces expédiées par AEM" (pluriel, accord féminin) -- une comparaison
+    stricte échouait sur ce cas réel. Retourne "" si non reconnu.
+    """
+    texte = _normaliser(sous_type)
+    if not texte:
+        return ""
+    if "sans piece" in texte:
+        return SOUS_TYPE_SANS_PIECE
+    if "iris" in texte:
+        return SOUS_TYPE_IRIS
+    if "aem" in texte:
+        return SOUS_TYPE_AEM
+    return ""
 
 
 def deduire_duree_defaut(texte_mail: str, problematique: str) -> tuple[str, str]:
@@ -332,12 +455,11 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
 
     ticket.intervention.niveau_priorite = deduire_niveau_service(ticket.intervention.type)
 
-    if ticket.intervention.sous_type and _normaliser(ticket.intervention.sous_type) not in (
-        _normaliser(s) for s in SOUS_TYPES_CONNUS
-    ):
+    sous_type_classifie = classifier_sous_type(ticket.intervention.sous_type)
+    if ticket.intervention.sous_type and not sous_type_classifie:
         notes.append(
-            f"Sous-type inattendu : {ticket.intervention.sous_type!r} "
-            f"(valeurs connues : AEM / IRIS / SANS pièces) — à vérifier."
+            f"Sous-type non reconnu (mots-clés attendus : AEM / IRIS / SANS pièce) : "
+            f"{ticket.intervention.sous_type!r} — à vérifier."
         )
     elif not ticket.intervention.sous_type:
         notes.append("Sous-type non renseigné — Besoin de matériel mis à Non par défaut, à vérifier.")
@@ -354,6 +476,18 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
         )
 
     ticket.intervention.origine = "Email"
+
+    # --- N° TPV (champ découvert sur un vrai mail, non documenté) ---
+    numero_tpv = extraire_numero_tpv(texte_mail)
+    if numero_tpv:
+        if ticket.intervention.reference_materiel_client and ticket.intervention.reference_materiel_client != numero_tpv:
+            notes.append(
+                f"N° TPV extrait du mail ({numero_tpv!r}) différent de "
+                f"reference_materiel_client déjà renseigné "
+                f"({ticket.intervention.reference_materiel_client!r}) — à vérifier."
+            )
+        else:
+            ticket.intervention.reference_materiel_client = numero_tpv
 
     # --- Problématique : on fait confiance au bloc INSTRUCTION TECH relu tel
     # quel dans le mail plutôt qu'à l'extraction Gemini, qui peut le scinder
@@ -388,6 +522,12 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
         ticket.logistics.tracking = tracking_ups
     materiel_ups = extraire_materiel_envoye_ups(texte_mail)
 
+    if not ticket.logistics.retour_piece:
+        retour_piece, note_retour = extraire_retour_colis_ups(texte_mail)
+        if retour_piece:
+            ticket.logistics.retour_piece = retour_piece
+            notes.append(note_retour)
+
     if not ticket.procedure.autre_outillage:
         outillage_detecte = extraire_outils_a_prevoir(texte_mail)
         if outillage_detecte:
@@ -411,6 +551,14 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
         tracking_ups,
         materiel_ups,
     )
+    hotline_numero, hotline_horaire = extraire_hotline_aem(texte_mail)
+    if hotline_numero:
+        ligne_hotline = (
+            f"Hotline AEM SOFTS : appeler le {hotline_numero} à l'arrivée ET à la "
+            f"fin de l'intervention"
+            + (f" (horaires : {hotline_horaire})." if hotline_horaire else ".")
+        )
+        ticket.procedure.travail_attendu = _ajouter_si_absent(ticket.procedure.travail_attendu, ligne_hotline)
     ticket.procedure.consignes_planification = enrichir_consignes_planification(
         ticket.procedure.consignes_planification,
         tracking_ups,
