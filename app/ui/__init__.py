@@ -1,5 +1,13 @@
 from .theme import (
     apply_theme,
-    horizontal_rule,
-    vertical_space,
+    configure_page,
+)
+
+from .layout import (
+    hero,
+    section,
+    divider,
+    footer,
+    empty_state,
+    page_title,
 )

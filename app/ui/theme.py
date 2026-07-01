@@ -78,3 +78,26 @@ def vertical_space(lines: int = 1) -> None:
 
     for _ in range(lines):
         st.write("")
+
+# ==========================================================
+# CONFIGURATION DE PAGE
+# ==========================================================
+
+def configure_page(
+    title: str,
+    icon: str = "🛠️",
+    layout: str = "wide",
+) -> None:
+    """
+    Configure une page Streamlit avec les paramètres
+    standard d'IRIS Copilot puis applique le thème.
+    """
+
+    st.set_page_config(
+        page_title=title,
+        page_icon=icon,
+        layout=layout,
+        initial_sidebar_state="expanded",
+    )
+
+    apply_theme()
