@@ -22,6 +22,16 @@ AGENTS_DISPONIBLES = {
     "SHOPPERTRAK": shoppertrak_agent.enrich_ticket,
 }
 
+# Clients dont la source de vérité est un fichier/texte-brut (cf.
+# traiter_fichier_complet()) -- signature différente d'AGENTS_DISPONIBLES,
+# volontairement tenus à part plutôt que forcés dans le même dict.
+CLIENTS_FICHIER = ("AXE_ESANTE", "ETAM", "DYNAMIZ_PHARMA")
+
+# Détecté mais pas encore automatisable (V3 -- navigation web requise).
+CLIENTS_NON_AUTOMATISES = ("PROMETHEAN",)
+
+TOUS_LES_CLIENTS = tuple(sorted(set(AGENTS_DISPONIBLES) | set(CLIENTS_FICHIER) | set(CLIENTS_NON_AUTOMATISES)))
+
 
 def detecter_client(texte_mail: str) -> str:
     """
@@ -111,19 +121,29 @@ def detecter_client(texte_mail: str) -> str:
     return ""
 
 
-def traiter_mail_complet(texte_mail: str) -> Ticket:
+def traiter_mail_complet(texte_mail: str, client_force: str | None = None) -> Ticket:
     """
     Pipeline complet :
-    1. Détecter le client SUR LE TEXTE BRUT
+    1. Détecter le client SUR LE TEXTE BRUT (sauf si `client_force` fourni)
     2. Extraire avec un prompt adapté à ce client
     3. Enrichir avec l'agent du client
+
+    `client_force` : permet d'imposer le client plutôt que de le détecter
+    automatiquement -- utilisé par l'UI (Streamlit) quand l'utilisateur
+    corrige une détection erronée. None (par défaut) = comportement
+    inchangé, détection automatique comme avant.
     """
-    client_detecte = detecter_client(texte_mail)
+    client_detecte = client_force or detecter_client(texte_mail)
 
     if not client_detecte:
         raise ValueError(
             "Client non reconnu dans ce mail. "
             "Vérifie le contenu ou ajoute ses signatures dans detecter_client()."
+        )
+    if client_detecte not in AGENTS_DISPONIBLES:
+        raise ValueError(
+            f"Client '{client_detecte}' n'est pas un client texte-seul -- "
+            f"utiliser traiter_fichier_complet() à la place."
         )
 
     # Extraction avec prompt adapté au client déjà connu
@@ -136,7 +156,7 @@ def traiter_mail_complet(texte_mail: str) -> Ticket:
     return ticket
 
 
-def traiter_fichier_complet(texte_mail: str, fichier=None) -> Ticket:
+def traiter_fichier_complet(texte_mail: str, fichier=None, client_force: str | None = None) -> Ticket:
     """
     Pipeline pour les clients dont la source de vérité est un FICHIER
     (Excel) ou un texte brut analysé par regex -- PAS le pipeline standard
@@ -149,8 +169,11 @@ def traiter_fichier_complet(texte_mail: str, fichier=None) -> Ticket:
 
     Les 3 agents ayant des signatures différentes (cf. AGENTS_DISPONIBLES),
     le dispatch est explicite plutôt que via un dict générique.
+
+    `client_force` : voir traiter_mail_complet() -- même logique d'override
+    manuel pour l'UI.
     """
-    client_detecte = detecter_client(texte_mail)
+    client_detecte = client_force or detecter_client(texte_mail)
     ticket = Ticket()
 
     if client_detecte == "AXE_ESANTE":
