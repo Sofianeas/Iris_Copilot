@@ -544,3 +544,20 @@ Toute évolution des agents ou des prompts résulte d'une décision humaine docu
 ## Transparence
 
 L'application doit pouvoir expliquer, lorsque c'est possible, sur quelles procédures ou quels documents elle s'est appuyée pour produire une proposition.
+
+## Utilisation des composants UI
+
+Toutes les pages Streamlit doivent importer leurs composants
+depuis :
+
+from app.ui.components import *
+
+Il est interdit d'importer directement :
+
+layout.py
+cards.py
+badges.py
+alerts.py
+forms.py
+
+Cette règle garantit une API stable pour toute l'application.

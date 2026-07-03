@@ -223,12 +223,43 @@ def embed_texts_tfidf(textes: list[str]) -> list[list[float]]:
     mécanique de chunking/stockage/retrieval ChromaDB sans clé Gemini.
     Pas une vraie recherche sémantique (pas de synonymes, pas de sens) --
     cf. tests/test_vectorstore.py.
+
+    ⚠️ NE PAS utiliser cette fonction directement pour l'indexation ET la
+    requête séparément : `TfidfVectorizer().fit_transform()` re-ajuste un
+    NOUVEAU vocabulaire/espace vectoriel à chaque appel -- les embeddings
+    de la requête ne seraient alors pas comparables à ceux de l'index
+    (dimensions différentes, ChromaDB lèverait une erreur ou renverrait un
+    résultat incohérent). Utiliser `make_tfidf_embedder()` à la place, qui
+    ajuste le vectorizer UNE SEULE FOIS sur tout le corpus et réutilise ce
+    même espace vectoriel (.transform(), jamais .fit_transform() après le
+    premier appel) pour l'indexation ET chaque requête.
     """
     from sklearn.feature_extraction.text import TfidfVectorizer
 
     vectorizer = TfidfVectorizer(max_features=512)
     matrice = vectorizer.fit_transform(textes)
     return matrice.toarray().tolist()
+
+
+def make_tfidf_embedder(corpus_pour_vocabulaire: list[str]) -> EmbedFn:
+    """
+    Factory pour le stand-in de test TF-IDF (cf. avertissement ci-dessus) :
+    ajuste UNE SEULE FOIS un TfidfVectorizer sur `corpus_pour_vocabulaire`
+    (typiquement l'ensemble des chunks à indexer), puis retourne une
+    fonction qui réutilise ce même espace vectoriel (.transform()) pour
+    tout texte ultérieur -- indexation ET requêtes de retrieval comprises.
+    C'est cette fonction, PAS `embed_texts_tfidf`, qu'il faut passer à
+    `construire_vectorstore()` et `lookup_rule()` dans les tests.
+    """
+    from sklearn.feature_extraction.text import TfidfVectorizer
+
+    vectorizer = TfidfVectorizer(max_features=512)
+    vectorizer.fit(corpus_pour_vocabulaire)
+
+    def _embed(textes: list[str]) -> list[list[float]]:
+        return vectorizer.transform(textes).toarray().tolist()
+
+    return _embed
 
 
 # --------------------------------------------------------------------------
@@ -245,6 +276,12 @@ def construire_vectorstore(
     client, chunks issus de SKILL.md + docx + TOKI. Idempotent -- les
     collections existantes sont supprimées et recréées (rebuild complet,
     pas d'append incrémental pour cette V1).
+
+    ⚠️ Si `embed_fn` est un stand-in TF-IDF (`make_tfidf_embedder`), passer
+    EXACTEMENT la même instance à `lookup_rule()` ensuite -- cf.
+    avertissement sur `make_tfidf_embedder`. Sans objet avec
+    `embed_texts_gemini` (embeddings pré-entraînés, même espace vectoriel
+    pour tout texte par construction).
     """
     chunks = construire_chunks(dossier_sources)
 
@@ -282,6 +319,8 @@ def construire_vectorstore(
 class ReponseRetrievee:
     chunks: list[str]
     sources: list[dict]
+    ids: list[str]
+    distances: list[float]
 
 
 def lookup_rule(
@@ -303,11 +342,13 @@ def lookup_rule(
     try:
         collection = store.get_collection(nom_collection)
     except Exception:
-        return ReponseRetrievee(chunks=[], sources=[])
+        return ReponseRetrievee(chunks=[], sources=[], ids=[], distances=[])
 
     embedding_question = embed_fn([question])[0]
     resultats = collection.query(query_embeddings=[embedding_question], n_results=n_results)
 
     documents = resultats.get("documents", [[]])[0]
     metadatas = resultats.get("metadatas", [[]])[0]
-    return ReponseRetrievee(chunks=documents, sources=metadatas)
+    ids = resultats.get("ids", [[]])[0]
+    distances = resultats.get("distances", [[]])[0]
+    return ReponseRetrievee(chunks=documents, sources=metadatas, ids=ids, distances=distances)

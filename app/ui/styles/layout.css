@@ -1,0 +1,46 @@
+/* ==========================================================
+LAYOUT
+========================================================== */
+
+/* ==========================================================
+Hero
+========================================================== */
+
+.hero {
+    padding: 2rem;
+    border-radius: var(--radius-lg);
+    background: linear-gradient(
+        135deg,
+        var(--primary),
+        var(--secondary)
+    );
+    color: white;
+    margin-bottom: 2rem;
+}
+
+.hero h1 {
+    color: white;
+    margin-bottom: .4rem;
+}
+
+.hero p {
+    opacity: .9;
+}
+
+/* ==========================================================
+Card Container
+========================================================== */
+
+.iris-card {
+    background: var(--surface);
+    border-radius: var(--radius);
+    padding: 1.25rem;
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow);
+    transition: var(--transition);
+}
+
+.iris-card:hover {
+    transform: translateY(-3px);
+    border-color: var(--primary);
+}

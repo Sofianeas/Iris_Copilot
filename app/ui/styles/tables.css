@@ -1,0 +1,23 @@
+/* ==========================================================
+   TABLES
+========================================================== */
+
+table {
+
+    border-collapse: collapse;
+
+}
+
+thead {
+
+    background: var(--primary);
+
+    color: white;
+
+}
+
+tbody tr:hover {
+
+    background: rgba(255,255,255,.03);
+
+}

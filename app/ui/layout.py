@@ -9,16 +9,30 @@ from __future__ import annotations
 
 import streamlit as st
 
-from .constants import (
-    APP_NAME,
-    APP_SUBTITLE,
-    COPYRIGHT,
-)
+from .constants import COPYRIGHT
+
+from .render import render_html
 
 
 # ==========================================================
 # HERO
 # ==========================================================
+
+def _build_hero(
+    title: str,
+    subtitle: str = "",
+    icon: str = "🛠️",
+) -> str:
+    """
+    Build the hero section HTML.
+    """
+    return f"""
+    <div class="hero">
+        <div class="hero-title">{icon} {title}</div>
+        <div class="hero-subtitle">{subtitle}</div>
+    </div>
+    """
+
 
 def hero(
     title: str,
@@ -28,24 +42,26 @@ def hero(
     """
     Affiche le bandeau principal de la page.
     """
-
-    st.markdown(
-        f"""
-<div class="hero fade-in">
-
-<h1>{icon} {title}</h1>
-
-<p>{subtitle}</p>
-
-</div>
-""",
-        unsafe_allow_html=True,
-    )
+    render_html(_build_hero(title, subtitle, icon))
 
 
 # ==========================================================
 # SECTION
 # ==========================================================
+
+def _build_section(
+    title: str,
+    icon: str = "",
+) -> str:
+    """
+    Build a section heading HTML.
+    """
+    return f"""
+    <div class="section-title">
+        {icon} {title}
+    </div>
+    """
+
 
 def section(
     title: str,
@@ -54,14 +70,7 @@ def section(
     """
     Affiche un titre de section.
     """
-
-    st.markdown(
-        f"""
-<h2>{icon} {title}</h2>
-""",
-        unsafe_allow_html=True,
-    )
-
+    render_html(_build_section(title, icon))
     st.divider()
 
 
@@ -73,7 +82,6 @@ def divider() -> None:
     """
     Affiche une ligne de séparation.
     """
-
     st.divider()
 
 
@@ -88,7 +96,6 @@ def empty_state(
     """
     Affiche un message lorsqu'il n'y a aucune donnée.
     """
-
     st.info(f"{icon} {text}")
 
 
@@ -100,9 +107,7 @@ def footer() -> None:
     """
     Pied de page commun.
     """
-
     st.divider()
-
     st.caption(COPYRIGHT)
 
 
@@ -117,5 +122,4 @@ def page_title(
     """
     Affiche un titre simple.
     """
-
     st.title(f"{icon} {title}")

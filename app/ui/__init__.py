@@ -1,13 +1,23 @@
+"""
+IRIS Copilot
+UI Library
+
+Point d'entrée public du Design System.
+Tous les composants UI doivent être importés depuis ce module.
+"""
+
+from __future__ import annotations
+
+# ==========================================================
+# Theme
+# ==========================================================
+
 from .theme import (
-    apply_theme,
+    load_theme,
     configure_page,
 )
 
-from .layout import (
-    hero,
-    section,
-    divider,
-    footer,
-    empty_state,
-    page_title,
-)
+# ==========================================================
+# Public UI Components
+# ==========================================================
+

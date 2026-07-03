@@ -1,0 +1,82 @@
+/* ==========================================================
+IRIS Copilot
+Buttons
+========================================================== */
+
+/* ==========================================================
+Base Button
+========================================================== */
+
+.iris-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+
+    padding: 10px 16px;
+    border-radius: var(--radius);
+
+    font-weight: 600;
+    font-size: 14px;
+
+    cursor: pointer;
+    user-select: none;
+
+    border: 1px solid transparent;
+
+    transition: var(--transition);
+
+    text-decoration: none;
+}
+
+/* ==========================================================
+Primary Button
+========================================================== */
+
+.iris-btn-primary {
+    background: var(--primary);
+    color: white;
+}
+
+.iris-btn-primary:hover {
+    background: var(--primary-light);
+    transform: translateY(-2px);
+    box-shadow: var(--shadow);
+}
+
+/* ==========================================================
+Secondary Button
+========================================================== */
+
+.iris-btn-secondary {
+    background: var(--surface);
+    color: var(--text);
+    border: 1px solid var(--border);
+}
+
+.iris-btn-secondary:hover {
+    border-color: var(--primary);
+    transform: translateY(-2px);
+}
+
+/* ==========================================================
+Danger Button
+========================================================== */
+
+.iris-btn-danger {
+    background: var(--danger);
+    color: white;
+}
+
+.iris-btn-danger:hover {
+    opacity: 0.9;
+    transform: translateY(-2px);
+}
+
+/* ==========================================================
+Full width
+========================================================== */
+
+.iris-btn-full {
+    width: 100%;
+}
