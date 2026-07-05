@@ -2,103 +2,65 @@
    Alerts
 ========================================================== */
 
-.iris-alert{
+.iris-alert {
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
 
-    display:flex;
-    align-items:flex-start;
-    gap:16px;
+    margin: 16px 0;
+    padding: 16px;
 
-    margin:16px 0;
-    padding:16px;
+    border-radius: 12px;
+    border-left: 5px solid transparent;
 
-    border-radius:12px;
+    background: var(--surface);
 
-    border-left:5px solid transparent;
+    box-shadow: var(--shadow);
 
-    background:var(--surface);
-
-    box-shadow:var(--shadow);
-
+    transition: var(--transition);
 }
 
-.iris-alert-icon{
-
-    font-size:1.4rem;
-
-    line-height:1;
-
-    flex-shrink:0;
-
+.iris-alert:hover {
+    transform: translateY(-2px);
 }
 
-.iris-alert-content{
-
-    flex:1;
-
+.iris-alert-icon {
+    font-size: 1.4rem;
+    line-height: 1;
+    flex-shrink: 0;
 }
 
-.iris-alert-title{
-
-    font-weight:700;
-
-    margin-bottom:4px;
-
-    color:var(--text);
-
+.iris-alert-content {
+    flex: 1;
 }
 
-.iris-alert-description{
-
-    color:var(--text-secondary);
-
-    line-height:1.6;
-
+.iris-alert-title {
+    font-weight: 700;
+    margin-bottom: 4px;
+    color: var(--text);
 }
 
-/* Success */
-
-.iris-alert-success{
-
-    border-left-color:var(--success);
-
-    background:var(--success-bg);
-
+.iris-alert-description {
+    color: var(--text-secondary);
+    line-height: 1.6;
 }
 
-/* Warning */
-
-.iris-alert-warning{
-
-    border-left-color:var(--warning);
-
-    background:var(--warning-bg);
-
+.iris-alert-success {
+    border-left-color: var(--success);
+    background: var(--success-bg);
 }
 
-/* Error */
-
-.iris-alert-error{
-
-    border-left-color:var(--danger);
-
-    background:var(--danger-bg);
-
+.iris-alert-warning {
+    border-left-color: var(--warning);
+    background: var(--warning-bg);
 }
 
-/* Info */
-
-.iris-alert-info{
-
-    border-left-color:var(--info);
-
-    background:var(--info-bg);
-
+.iris-alert-error {
+    border-left-color: var(--danger);
+    background: var(--danger-bg);
 }
 
-.iris-alert:hover{
-
-    transform:translateY(-2px);
-
-    transition:.2s ease;
-
+.iris-alert-info {
+    border-left-color: var(--info);
+    background: var(--info-bg);
 }

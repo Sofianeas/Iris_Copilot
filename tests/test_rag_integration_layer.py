@@ -168,15 +168,35 @@ def test_vectorstore_non_fourni_aucun_crash(vectorstore_prepare):
     assert ticket.intervention.commentaire_interne == ""
 
 
-def test_score_min_strict_aucune_note_si_sous_seuil(vectorstore_prepare):
-    """score_min trop exigeant -> aucune suggestion appliquée, même si un candidat existe techniquement."""
+def test_score_min_strict_aucune_note_si_sous_seuil(vectorstore_prepare, monkeypatch):
+    """MIN_SCORE (config) trop exigeant -> aucune suggestion appliquée, même si un candidat existe techniquement."""
+    import app.config.rag_settings as rag_settings
+    monkeypatch.setattr(rag_settings, "MIN_SCORE", 0.99)
+
     dossier, embed_fn = vectorstore_prepare
     ticket = _ticket_vierge()
 
     enrichir_commentaire_si_pertinent(
         ticket=ticket, champ_manquant="Contrat", valeur_actuelle="",
         client="TESTCLIENT", question="quel est le contrat applicable",
-        dossier_persistance=dossier, embed_fn=embed_fn, score_min=0.99,
+        dossier_persistance=dossier, embed_fn=embed_fn,
+    )
+
+    assert ticket.intervention.commentaire_interne == ""
+
+
+def test_enable_rag_desactive_aucune_tentative(vectorstore_prepare, monkeypatch):
+    """ENABLE_RAG=False (config) -> court-circuit avant même le retrieval, commentaire_interne inchangé."""
+    import app.config.rag_settings as rag_settings
+    monkeypatch.setattr(rag_settings, "ENABLE_RAG", False)
+
+    dossier, embed_fn = vectorstore_prepare
+    ticket = _ticket_vierge()
+
+    enrichir_commentaire_si_pertinent(
+        ticket=ticket, champ_manquant="Contrat", valeur_actuelle="",
+        client="TESTCLIENT", question="quel est le contrat applicable",
+        dossier_persistance=dossier, embed_fn=embed_fn,
     )
 
     assert ticket.intervention.commentaire_interne == ""

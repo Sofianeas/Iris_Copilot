@@ -1,11 +1,10 @@
 /* ==========================================================
    TYPOGRAPHY
-   ========================================================== */
+========================================================== */
 
 html,
 body,
 [data-testid="stAppViewContainer"] {
-
     background: var(--background);
     color: var(--text);
 
@@ -22,8 +21,10 @@ h1 {
 
 h2 {
     font-size: 1.5rem;
+    font-weight: 600;
 }
 
 h3 {
     font-size: 1.2rem;
+    font-weight: 600;
 }

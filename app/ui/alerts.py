@@ -55,22 +55,14 @@ def alert(
         </div>
         """
 
-    render_html(
-        f"""
-        <div class="iris-alert iris-alert-{variant}">
-
-            {icon_html}
-
-            <div class="iris-alert-content">
-
-                <div class="iris-alert-title">
-                    {title}
-                </div>
-
-                {description_html}
-
-            </div>
-
-        </div>
-        """
+    html = (
+    f'<div class="iris-alert iris-alert-{variant}">'
+    f'{icon_html}'
+    f'<div class="iris-alert-content">'
+    f'<div class="iris-alert-title">{title}</div>'
+    f'{description_html}'
+    f'</div>'
+    f'</div>'
     )
+
+    render_html(html)

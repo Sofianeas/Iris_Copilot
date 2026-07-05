@@ -40,11 +40,9 @@ def load_theme() -> None:
     css = ""
 
     for filename in CSS_FILES:
-
         css_path = styles_dir / filename
 
         if css_path.exists():
-
             css += css_path.read_text(encoding="utf-8")
             css += "\n\n"
 

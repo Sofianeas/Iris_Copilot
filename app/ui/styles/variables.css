@@ -1,72 +1,54 @@
 /* ==========================================================
    VARIABLES
-   ========================================================== */
+========================================================== */
 
 :root {
 
     /* Brand */
-
     --primary: #0F62FE;
     --primary-light: #3D8BFF;
     --secondary: #00C2FF;
 
     /* Status */
-
     --success: #22C55E;
     --warning: #F59E0B;
     --danger: #EF4444;
     --info: #38BDF8;
 
-
-    /* ==========================================================
-   Alert Backgrounds
-========================================================== */
-
---success-bg: rgba(34, 197, 94, 0.08);
-
---warning-bg: rgba(245, 158, 11, 0.08);
-
---danger-bg: rgba(239, 68, 68, 0.08);
-
---info-bg: rgba(56, 189, 248, 0.08);
+    /* Alert Backgrounds */
+    --success-bg: rgba(34, 197, 94, 0.08);
+    --warning-bg: rgba(245, 158, 11, 0.08);
+    --danger-bg: rgba(239, 68, 68, 0.08);
+    --info-bg: rgba(56, 189, 248, 0.08);
 
     /* Background */
-
     --background: #0E1117;
     --surface: #1C1F26;
     --surface-light: #242A35;
 
     /* Text */
-
     --text: #F3F4F6;
     --text-secondary: #B7BDC8;
     --text-muted: #7B8494;
 
     /* Borders */
-
     --border: #313744;
 
     /* Radius */
-
     --radius-sm: 6px;
     --radius: 12px;
     --radius-lg: 18px;
 
     /* Shadow */
-
-    --shadow:
-        0 8px 24px rgba(0,0,0,.25);
+    --shadow: 0 8px 24px rgba(0, 0, 0, .25);
 
     /* Transition */
-
     --transition: all .25s ease;
 
     /* Spacing */
-
     --space-xs: .25rem;
     --space-sm: .5rem;
     --space-md: 1rem;
     --space-lg: 1.5rem;
     --space-xl: 2rem;
 }
-
