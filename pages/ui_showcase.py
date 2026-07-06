@@ -28,6 +28,15 @@ from app.ui import (
     metric_row,
     data_table,
     timeline,
+    sidebar,
+    sidebar_title,
+    sidebar_section,
+    sidebar_text,
+    sidebar_divider,
+    breadcrumbs,
+    nav_group,
+    nav_link,
+    tabs,
 )
 
 from app.ui.components import *
@@ -468,4 +477,59 @@ timeline(
     ]
 )
 
+divider()
 
+section_title("Sidebar")
+caption("Composants réutilisables pour la barre latérale.")
+
+with sidebar():
+    sidebar_title("IRIS Copilot")
+
+    sidebar_section("Informations")
+
+    sidebar_text("Version : 0.1.0")
+
+    sidebar_text("Environnement : Développement")
+
+    sidebar_divider()
+
+    sidebar_section("Utilisateur")
+
+    sidebar_text("Nom : Démonstration")
+
+divider()
+
+section_title("Navigation")
+caption("Composants réutilisables pour la navigation.")
+
+breadcrumbs(
+    [
+        "Accueil",
+        "Support",
+        "Ticket #1542",
+    ]
+)
+
+nav_group("Menu principal")
+
+nav_link("Accueil")
+nav_link("Tickets")
+nav_link("Inventaire")
+nav_link("Paramètres")
+
+overview_tab, history_tab, comments_tab = tabs(
+    [
+        "Vue générale",
+        "Historique",
+        "Commentaires",
+    ]
+)
+
+with overview_tab:
+    st.write("Contenu de la vue générale.")
+
+with history_tab:
+    st.write("Historique du ticket.")
+
+with comments_tab:
+    st.write("Commentaires.")

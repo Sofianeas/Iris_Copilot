@@ -80,7 +80,7 @@ def main() -> int:
 
     echecs: list[str] = []
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         dossier, embed_fn = _construire_mini_vectorstore(Path(tmp))
 
         scenarios = [

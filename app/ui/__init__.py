@@ -68,3 +68,26 @@ from .tables import (
 from .timeline import (
     timeline,
 )
+
+# ==========================================================
+# Sidebar
+# ==========================================================
+
+from .sidebar import (
+    sidebar,
+    sidebar_divider,
+    sidebar_section,
+    sidebar_text,
+    sidebar_title,
+)
+
+# ==========================================================
+# Navigation
+# ==========================================================
+
+from .navigation import (
+    breadcrumbs,
+    nav_group,
+    nav_link,
+    tabs,
+)
