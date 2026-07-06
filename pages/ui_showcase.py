@@ -9,7 +9,15 @@ from __future__ import annotations
 
 import streamlit as st
 
-from app.ui import configure_page
+from app.ui import (
+    configure_page,
+    primary_button,
+    secondary_button,
+    success_button,
+    warning_button,
+    danger_button,
+)
+
 from app.ui.components import *
 
 # ==========================================================
@@ -271,19 +279,64 @@ Les prochains composants seront ajoutés ici :
 )
 
 # ==========================================================
+# Buttons
+# ==========================================================
+
+section(
+    "Buttons",
+    "🔘",
+)
+
+col1, col2 = st.columns(2)
+
+with col1:
+
+    if primary_button(
+        "Créer un ticket",
+        icon="➕",
+        full_width=True,
+        key="showcase_primary",
+    ):
+        st.success("Bouton principal cliqué.")
+
+    if success_button(
+        "Valider",
+        icon="✅",
+        full_width=True,
+        key="showcase_success",
+    ):
+        st.success("Action validée.")
+
+with col2:
+
+    if secondary_button(
+        "Annuler",
+        icon="✖️",
+        full_width=True,
+        key="showcase_secondary",
+    ):
+        st.info("Action annulée.")
+
+    if warning_button(
+        "Attention",
+        icon="⚠️",
+        full_width=True,
+        key="showcase_warning",
+    ):
+        st.warning("Attention.")
+
+    if danger_button(
+        "Supprimer",
+        icon="🗑️",
+        full_width=True,
+        key="showcase_danger",
+    ):
+        st.error("Suppression.")
+
+# ==========================================================
 # Footer
 # ==========================================================
 
 footer()
 
-import app.ui.components as ui
 
-if ui.primary_button(
-    "Créer un ticket",
-    icon="➕",
-    full_width=True,
-):
-    st.success("Ticket créé")
-
-if ui.primary_button("Créer un ticket", icon="➕", full_width=True):
-    st.success("Ticket créé")
