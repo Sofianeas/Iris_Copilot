@@ -8,6 +8,7 @@ Page de démonstration de tous les composants graphiques.
 from __future__ import annotations
 
 import streamlit as st
+import pandas as pd
 
 from app.ui import (
     configure_page,
@@ -16,6 +17,17 @@ from app.ui import (
     success_button,
     warning_button,
     danger_button,
+    page_title,
+    section_title,
+    subtitle,
+    body_text,
+    caption,
+    code_block,
+    divider,
+    metric,
+    metric_row,
+    data_table,
+    timeline,
 )
 
 from app.ui.components import *
@@ -333,10 +345,127 @@ with col2:
     ):
         st.error("Suppression.")
 
+
+# ==========================================================
+# Typography
+# ==========================================================
+
+section(
+    "Typography",
+    "📝",
+)
+
+page_title("Titre principal")
+
+section_title("Titre de section")
+
+subtitle("Sous-titre")
+
+body_text(
+    "Ce texte est affiché via le composant body_text() "
+    "du Design System."
+)
+
+caption(
+    "Exemple de légende."
+)
+
+code_block(
+    """def hello():
+    print("Hello IRIS Copilot")""",
+    language="python",
+)
+
+divider()
+
+section_title("Metrics")
+caption("Composants réutilisables pour l'affichage des indicateurs.")
+
+metric(
+    label="Tickets ouverts",
+    value=42,
+)
+
+metric(
+    label="SLA",
+    value="97 %",
+    delta="+2 %",
+)
+
+metric(
+    label="Temps moyen",
+    value="18 min",
+    help="Temps moyen de résolution des tickets.",
+)
+
+metric_row(
+    [
+        {
+            "label": "Tickets",
+            "value": 142,
+        },
+        {
+            "label": "SLA",
+            "value": "96 %",
+            "delta": "+3 %",
+        },
+        {
+            "label": "Temps moyen",
+            "value": "14 min",
+            "help": "Calculé sur les 30 derniers jours.",
+        },
+    ]
+)
+
 # ==========================================================
 # Footer
 # ==========================================================
 
 footer()
+
+divider()
+
+section_title("Tables")
+caption("Composants réutilisables pour l'affichage de tableaux.")
+
+demo_df = pd.DataFrame(
+    {
+        "Ticket": ["INC-1001", "INC-1002", "INC-1003"],
+        "Client": ["ADOPT", "AMPLIFON", "AEMSOFT"],
+        "Statut": ["Ouvert", "En cours", "Résolu"],
+        "Priorité": ["Haute", "Moyenne", "Basse"],
+    }
+)
+
+data_table(demo_df)
+
+divider()
+
+section_title("Timeline")
+caption("Composant réutilisable pour l'affichage d'une chronologie.")
+
+timeline(
+    [
+        {
+            "title": "Ticket créé",
+            "timestamp": "06/07/2026 09:15",
+            "description": "Le ticket a été créé depuis la boîte SAV.",
+        },
+        {
+            "title": "Technicien affecté",
+            "timestamp": "06/07/2026 09:32",
+            "description": "Le ticket a été affecté à un technicien N1.",
+        },
+        {
+            "title": "Intervention planifiée",
+            "timestamp": "06/07/2026 10:10",
+        },
+        {
+            "title": "Ticket clôturé",
+            "timestamp": "06/07/2026 11:48",
+            "description": "Résolution validée par le client.",
+        },
+    ]
+)
 
 
