@@ -37,6 +37,19 @@ from app.ui import (
     nav_group,
     nav_link,
     tabs,
+    text_input,
+text_area,
+number_input,
+slider,
+selectbox,
+multiselect,
+radio,
+checkbox,
+toggle,
+date_input,
+time_input,
+file_uploader,
+form_submit_button,
 )
 
 from app.ui.components import *
@@ -533,3 +546,121 @@ with history_tab:
 
 with comments_tab:
     st.write("Commentaires.")
+
+
+# ==========================================================
+# Forms
+# ==========================================================
+
+divider()
+
+section_title("Forms")
+caption("Composants réutilisables pour les formulaires.")
+
+subtitle("Text Inputs")
+
+text_input(
+    "Text input",
+    placeholder="Enter some text...",
+    help="Example of a text input.",
+)
+
+text_area(
+    "Text area",
+    placeholder="Write something...",
+    help="Example of a multiline text area.",
+)
+
+divider()
+
+subtitle("Numeric Inputs")
+
+number_input(
+    "Number input",
+    value=10,
+    min_value=0,
+    max_value=100,
+)
+
+slider(
+    "Slider",
+    min_value=0,
+    max_value=100,
+    value=50,
+)
+
+divider()
+
+subtitle("Selection Inputs")
+
+selectbox(
+    "Selectbox",
+    [
+        "Option 1",
+        "Option 2",
+        "Option 3",
+    ],
+)
+
+multiselect(
+    "Multiselect",
+    [
+        "Option 1",
+        "Option 2",
+        "Option 3",
+    ],
+    default=["Option 1"],
+)
+
+radio(
+    "Radio",
+    [
+        "Option 1",
+        "Option 2",
+        "Option 3",
+    ],
+)
+
+divider()
+
+subtitle("Boolean Inputs")
+
+checkbox(
+    "Checkbox",
+)
+
+toggle(
+    "Toggle",
+    value=True,
+)
+
+divider()
+
+subtitle("Date & Time Inputs")
+
+date_input(
+    "Date input",
+)
+
+time_input(
+    "Time input",
+)
+
+divider()
+
+subtitle("Upload & Submission")
+
+with st.form("showcase_form"):
+
+    file_uploader(
+        "File uploader",
+        type=["txt", "pdf"],
+    )
+
+    submitted = form_submit_button(
+        "Submit",
+    )
+
+if submitted:
+    st.success("Form submitted.")
+
