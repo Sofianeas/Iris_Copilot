@@ -50,6 +50,47 @@ date_input,
 time_input,
 file_uploader,
 form_submit_button,
+  add,
+    analytics,
+    arrow_back,
+    arrow_forward,
+    attachment,
+    calendar,
+    cancel,
+    check,
+    close,
+    dashboard,
+    delete,
+    download,
+    edit,
+    error,
+    expand_less,
+    expand_more,
+    file,
+    filter,
+    folder,
+    group,
+    help,
+    home,
+    info,
+    lock,
+    mail,
+    pause,
+    person,
+    phone,
+    play,
+    refresh,
+    save,
+    schedule,
+    search,
+    settings,
+    stop,
+    support,
+    ticket,
+    unlock,
+    upload,
+    visibility,
+    warning,
 )
 
 from app.ui.components import *
@@ -663,4 +704,112 @@ with st.form("showcase_form"):
 
 if submitted:
     st.success("Form submitted.")
+
+section_title("Icons")
+
+st.markdown("##### Actions")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.write(f"{add()} add()")
+    st.write(f"{edit()} edit()")
+    st.write(f"{delete()} delete()")
+    st.write(f"{save()} save()")
+    st.write(f"{cancel()} cancel()")
+
+with col2:
+    st.write(f"{search()} search()")
+    st.write(f"{filter()} filter()")
+    st.write(f"{refresh()} refresh()")
+    st.write(f"{download()} download()")
+    st.write(f"{upload()} upload()")
+
+st.markdown("##### Navigation")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.write(f"{home()} home()")
+    st.write(f"{dashboard()} dashboard()")
+    st.write(f"{arrow_back()} arrow_back()")
+
+with col2:
+    st.write(f"{arrow_forward()} arrow_forward()")
+    st.write(f"{expand_more()} expand_more()")
+    st.write(f"{expand_less()} expand_less()")
+
+st.markdown("##### Users")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.write(f"{person()} person()")
+
+with col2:
+    st.write(f"{group()} group()")
+    st.write(f"{settings()} settings()")
+
+st.markdown("##### Status")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.write(f"{check()} check()")
+    st.write(f"{warning()} warning()")
+
+with col2:
+    st.write(f"{error()} error()")
+    st.write(f"{info()} info()")
+    st.write(f"{close()} close()")
+
+st.markdown("##### Communication")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.write(f"{mail()} mail()")
+    st.write(f"{phone()} phone()")
+
+with col2:
+    st.write(f"{calendar()} calendar()")
+    st.write(f"{schedule()} schedule()")
+
+st.markdown("##### Files")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.write(f"{folder()} folder()")
+    st.write(f"{file()} file()")
+
+with col2:
+    st.write(f"{attachment()} attachment()")
+
+st.markdown("##### Interface")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.write(f"{visibility()} visibility()")
+
+with col2:
+    st.write(f"{lock()} lock()")
+    st.write(f"{unlock()} unlock()")
+
+st.markdown("##### Misc")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.write(f"{play()} play()")
+    st.write(f"{pause()} pause()")
+    st.write(f"{stop()} stop()")
+
+with col2:
+    st.write(f"{analytics()} analytics()")
+    st.write(f"{help()} help()")
+    st.write(f"{support()} support()")
+    st.write(f"{ticket()} ticket()")
+
 
