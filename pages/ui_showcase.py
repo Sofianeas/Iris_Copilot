@@ -323,38 +323,6 @@ alert(
     variant="info",
 )
 
-# ==========================================================
-# Prochaines sections
-# ==========================================================
-
-section(
-    "Composants à venir",
-    "🚀",
-)
-
-st.info(
-"""
-Les prochains composants seront ajoutés ici :
-
-• Buttons
-
-• Forms
-
-• Tables
-
-• Sidebar
-
-• Timeline
-
-• Toast
-
-• Modal
-
-• KPI
-
-• Charts
-"""
-)
 
 # ==========================================================
 # Buttons
