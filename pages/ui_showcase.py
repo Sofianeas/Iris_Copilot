@@ -38,19 +38,19 @@ from app.ui import (
     nav_link,
     tabs,
     text_input,
-text_area,
-number_input,
-slider,
-selectbox,
-multiselect,
-radio,
-checkbox,
-toggle,
-date_input,
-time_input,
-file_uploader,
-form_submit_button,
-  add,
+    text_area,
+    number_input,
+    slider,
+    selectbox,
+    multiselect,
+    radio,
+    checkbox,
+    toggle,
+    date_input,
+    time_input,
+    file_uploader,
+    form_submit_button,
+    add,
     analytics,
     arrow_back,
     arrow_forward,
@@ -91,9 +91,24 @@ form_submit_button,
     upload,
     visibility,
     warning,
+    hero,
+    section,
+    empty_state,
+    footer,
+
+    metric_card,
+    info_card,
+    feature_card,
+    action_card,
+    stat_card,
+
+    badge,
+    badge_group,
+
+    alert,
 )
 
-from app.ui.components import *
+
 
 # ==========================================================
 # Configuration
@@ -151,10 +166,7 @@ section(
     "📄",
 )
 
-page_title(
-    "Historique",
-    "📜",
-)
+page_title("📜 Historique")
 
 # ==========================================================
 # Cards
@@ -281,15 +293,6 @@ badge_group(
 # ==========================================================
 # Alerts
 # ==========================================================
-st.markdown(
-    """
-<div style="background:red;color:white;padding:20px;border-radius:10px">
-    TEST HTML
-</div>
-""",
-    unsafe_allow_html=True,
-)
-
 
 section(
     "Alerts",
