@@ -1,6 +1,11 @@
 import streamlit as st
 
+from app.shell import ApplicationShell
 from app.ui import load_theme
+
+# ------------------------------------------------------------------
+# Configuration Streamlit
+# ------------------------------------------------------------------
 
 st.set_page_config(
     page_title="IRIS Copilot",
@@ -8,13 +13,15 @@ st.set_page_config(
     layout="wide",
 )
 
+# ------------------------------------------------------------------
+# Chargement du thème
+# ------------------------------------------------------------------
+
 load_theme()
 
+# ------------------------------------------------------------------
+# Lancement de l'application
+# ------------------------------------------------------------------
 
-st.title("🛠️ IRIS Copilot")
-
-st.markdown("""
-Bienvenue dans IRIS Copilot
-
-Projet d'assistant HelpDesk IRIS IT.
-""")
+shell = ApplicationShell()
+shell.run()
