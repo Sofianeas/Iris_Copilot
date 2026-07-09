@@ -48,6 +48,17 @@ Logique métier issue de AEMSOFT.docx + TOKI_AEM_SOFT.txt :
      spécifique à l'intervention (différent du contact générique "Amine"
      déjà codé en dur) -> ajouté dans `travail_attendu`.
 
+--- Intégration Rule Engine (cette étape) ---
+  5. Ajout de 2 paramètres optionnels à `enrich_ticket` :
+     `rag_decision: RagDecision | None = None` et
+     `activer_rule_engine: bool = False`. Désactivé par défaut : tous les
+     appels existants (`enrich_ticket(ticket, texte_mail)`) conservent un
+     comportement rigoureusement identique. Quand activé, le Rule Engine
+     est exécuté en toute fin de fonction et ses recommandations sont
+     ajoutées à `commentaire_interne` -- JAMAIS à un champ métier -- avec
+     confiance/source/raison visibles, cohérent avec la politique déjà en
+     place pour le RAG fallback ailleurs dans le projet.
+
 ⚠️ Hypothèses à vérifier (non documentées explicitement, ou en contradiction
    entre les deux sources) :
 
@@ -78,6 +89,8 @@ import re
 import unicodedata
 
 from app.models.ticket import Ticket
+from app.models.rag_decision import RagDecision
+from app.services import rule_engine
 
 
 def _sans_accents(texte: str) -> str:
@@ -385,11 +398,35 @@ def enrichir_consignes_planification(existant: str, tracking_ups: str) -> str:
     return texte
 
 
+def _formater_recommandations_rule_engine(recommandations) -> str:
+    """
+    Formate les RuleRecommendation (rule_engine.executer) en un bloc de
+    texte destiné à commentaire_interne -- ne modifie JAMAIS un champ
+    métier directement, cohérent avec la politique déjà appliquée pour le
+    RAG fallback ailleurs dans le projet (suggestion sourcée uniquement,
+    jamais une écriture silencieuse d'un champ).
+    """
+    if not recommandations:
+        return ""
+    lignes = ["🧩 Recommandations du Rule Engine (à vérifier, jamais appliquées automatiquement) :"]
+    for reco in recommandations:
+        lignes.append(
+            f"- Champ '{reco.field}' -> '{reco.value}' "
+            f"(confiance={reco.confidence:.2f}, source={reco.source}) : {reco.reason}"
+        )
+    return "\n".join(lignes)
+
+
 # --------------------------------------------------------------------------
 # Agent
 # --------------------------------------------------------------------------
 
-def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
+def enrich_ticket(
+    ticket: Ticket,
+    texte_mail: str = "",
+    rag_decision: RagDecision | None = None,
+    activer_rule_engine: bool = False,
+) -> Ticket:
     """
     Enrichit un Ticket déjà extrait du mail avec les règles métier AEMSOFT.
 
@@ -398,6 +435,20 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
     Gemini n'a pas forcément de champ dédié pour capturer (numéro de BDC si
     non déjà nettoyé, tracking UPS, matériel envoyé par le client, outillage
     requis).
+
+    `rag_decision` (optionnel) : une RagDecision déjà calculée en amont
+    (cf. app.services.rag_decision_service), transmise telle quelle au
+    Rule Engine si celui-ci est activé -- cet agent ne calcule jamais lui-
+    même de RagDecision, ne connaît ni vectorstore ni embeddings.
+
+    `activer_rule_engine` (par défaut False) : si True, exécute
+    `rule_engine.executer(ticket, rag_decision)` en toute fin de fonction
+    et ajoute ses recommandations à `commentaire_interne` -- JAMAIS à un
+    champ métier. Désactivé par défaut pour une rétrocompatibilité totale :
+    `priority_rule` ne dépend pas de `rag_decision` et pourrait sinon se
+    déclencher pour tout appelant existant dont le mail contient un mot-clé
+    d'urgence, changeant le contenu de `commentaire_interne` sans que ce
+    soit explicitement demandé.
     """
     notes: list[str] = []
 
@@ -583,6 +634,17 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
         bloc_notes = "⚠️ Points à vérifier (générés automatiquement) :\n" + "\n".join(f"- {n}" for n in notes)
         ticket.intervention.commentaire_interne = _ajouter_si_absent(
             ticket.intervention.commentaire_interne, bloc_notes
+        )
+
+    # --- Rule Engine (optionnel, rétrocompatible -- désactivé par défaut) ---
+    # Politique : jamais d'écriture directe sur un champ métier, uniquement
+    # des suggestions tracées dans commentaire_interne (même logique que le
+    # RAG fallback ailleurs dans le projet).
+    if activer_rule_engine:
+        recommandations = rule_engine.executer(ticket, rag_decision)
+        bloc_recommandations = _formater_recommandations_rule_engine(recommandations)
+        ticket.intervention.commentaire_interne = _ajouter_si_absent(
+            ticket.intervention.commentaire_interne, bloc_recommandations
         )
 
     return ticket
