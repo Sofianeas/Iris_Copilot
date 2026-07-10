@@ -48,6 +48,17 @@ Logique métier issue de AEMSOFT.docx + TOKI_AEM_SOFT.txt :
      spécifique à l'intervention (différent du contact générique "Amine"
      déjà codé en dur) -> ajouté dans `travail_attendu`.
 
+--- Intégration Rule Engine (cette étape) ---
+  5. Ajout de 2 paramètres optionnels à `enrich_ticket` :
+     `rag_decision: RagDecision | None = None` et
+     `activer_rule_engine: bool = False`. Désactivé par défaut : tous les
+     appels existants (`enrich_ticket(ticket, texte_mail)`) conservent un
+     comportement rigoureusement identique. Quand activé, le Rule Engine
+     est exécuté en toute fin de fonction et ses recommandations sont
+     ajoutées à `commentaire_interne` -- JAMAIS à un champ métier -- avec
+     confiance/source/raison visibles, cohérent avec la politique déjà en
+     place pour le RAG fallback ailleurs dans le projet.
+
 ⚠️ Hypothèses à vérifier (non documentées explicitement, ou en contradiction
    entre les deux sources) :
 
@@ -78,6 +89,8 @@ import re
 import unicodedata
 
 from app.models.ticket import Ticket
+from app.models.rag_decision import RagDecision
+from app.services import rule_engine
 
 
 def _sans_accents(texte: str) -> str:
@@ -111,10 +124,8 @@ SOUS_TYPE_SANS_PIECE = "Intervention SANS pièces"
 
 CONTRAT_AEMSOFT = ""  # TODO : libellé Pivot non documenté, voir hypothèse 1 du docstring
 
-# Durée moyenne TOKI, exception switch/serveur (cf. TOKI_AEM_SOFT.txt)
 MOTS_CLES_DUREE_LONGUE = ("switch", "serveur", "server")
 
-# Rappel opérationnel toujours ajouté au travail attendu (source : TOKI_AEM_SOFT.txt)
 ATTENTION_AEM = (
     "ATTENTION !\n"
     "L'appel au support AEM doit être fait à l'arrivée et à la fin de l'intervention.\n"
@@ -144,8 +155,6 @@ RE_INSTRUCTION_TECH = re.compile(
     r"instruction\s+tech\s*:?\s*(.+?)(?:\n\s*\n|lien de suivi|mat[ée]riel envoy|outils?\s+[aà]\s+pr[ée]voir|$)",
     re.IGNORECASE | re.DOTALL,
 )
-# Champs supplémentaires découverts sur un vrai mail (non documentés dans
-# AEMSOFT.docx/TOKI -- présents sur le terrain, à conserver pour traçabilité).
 RE_NUMERO_TPV = re.compile(r"n[°o]\s*tpv\s*:?\s*(\S+)", re.IGNORECASE)
 RE_RETOUR_COLIS_UPS = re.compile(r"retour colis par ups\s*:?\s*(oui|non)", re.IGNORECASE)
 RE_ETIQUETTE_RETOUR = re.compile(r"[ée]tiquette retour[^)\n]*", re.IGNORECASE)
@@ -153,12 +162,7 @@ RE_HOTLINE_ARRIVEE = re.compile(r"appeler le\s*:?\s*([\d.\s]{8,15}?)\s*\(hotline
 RE_HORAIRE_HOTLINE = re.compile(r"horaire de la hotline aem softs?\s*:?\s*([^\n]+)", re.IGNORECASE)
 
 
-# --------------------------------------------------------------------------
-# Helpers d'extraction (best-effort sur texte_mail brut)
-# --------------------------------------------------------------------------
-
 def nettoyer_numero_bdc(valeur: str) -> str:
-    """Isole les chiffres d'un numéro de BDC, qu'il soit déjà préfixé 'BDC' ou non."""
     if not valeur:
         return ""
     match = RE_BDC.search(valeur) or re.search(r"(\d+)", valeur)
@@ -166,12 +170,10 @@ def nettoyer_numero_bdc(valeur: str) -> str:
 
 
 def extraire_numero_bdc(texte_mail: str) -> str:
-    """Numéro de BDC présent dans l'objet du mail (filet de sécurité)."""
     return nettoyer_numero_bdc(texte_mail or "")
 
 
 def extraire_tracking_ups(texte_mail: str) -> str:
-    """Numéro/lien de suivi du colis UPS, champ 'Lien de suivi du colis UPS'."""
     if not texte_mail:
         return ""
     match = RE_TRACKING_UPS.search(texte_mail)
@@ -179,12 +181,6 @@ def extraire_tracking_ups(texte_mail: str) -> str:
 
 
 def extraire_materiel_envoye_ups(texte_mail: str) -> str:
-    """
-    Matériel envoyé par le client, champ 'Matériel envoyé par UPS :'.
-    Capture TOUTES les lignes de la liste à puces (corrige un bug où seule
-    la 1ère ligne était récupérée -- observé sur un vrai mail à 3 lignes
-    de matériel : les 2 dernières étaient silencieusement perdues).
-    """
     if not texte_mail:
         return ""
     match = RE_MATERIEL_UPS.search(texte_mail)
@@ -195,7 +191,6 @@ def extraire_materiel_envoye_ups(texte_mail: str) -> str:
 
 
 def extraire_outils_a_prevoir(texte_mail: str) -> str:
-    """Outillage spécifique demandé, champ 'OUTILS A PREVOIR' (hors matériel envoyé)."""
     if not texte_mail:
         return ""
     match = RE_OUTILS_A_PREVOIR.search(texte_mail)
@@ -203,13 +198,6 @@ def extraire_outils_a_prevoir(texte_mail: str) -> str:
 
 
 def extraire_type_aemsoft(texte_mail: str) -> str:
-    """
-    Filet de sécurité : relit la ligne 'Type :' du mail pour récupérer la
-    valeur AEMSOFT exacte (Intervention J+1 / Intervention date imposée).
-    Le champ générique `intervention.type` extrait par Gemini peut être pollué
-    par une classification générique (Maintenance/Installation/...) héritée
-    d'un prompt partagé entre plusieurs clients -> ce filet la corrige.
-    """
     if not texte_mail:
         return ""
     match = RE_TYPE_LIGNE.search(texte_mail)
@@ -220,12 +208,6 @@ def extraire_type_aemsoft(texte_mail: str) -> str:
 
 
 def extraire_instruction_tech(texte_mail: str) -> str:
-    """
-    Filet de sécurité : relit le bloc 'INSTRUCTION TECH :' du mail tel quel.
-    AEMSOFT.docx exige de recopier TOUT ce bloc dans Problématique, mais
-    l'extraction Gemini peut le scinder entre Problématique et Travail
-    attendu -> ce filet restaure le texte intégral.
-    """
     if not texte_mail:
         return ""
     match = RE_INSTRUCTION_TECH.search(texte_mail)
@@ -233,7 +215,6 @@ def extraire_instruction_tech(texte_mail: str) -> str:
 
 
 def extraire_numero_tpv(texte_mail: str) -> str:
-    """N° TPV concerné (ex. 'N° TPV : 2') -- champ observé sur un vrai mail, non documenté dans AEMSOFT.docx."""
     if not texte_mail:
         return ""
     match = RE_NUMERO_TPV.search(texte_mail)
@@ -241,12 +222,6 @@ def extraire_numero_tpv(texte_mail: str) -> str:
 
 
 def extraire_retour_colis_ups(texte_mail: str) -> tuple[str, str]:
-    """
-    'RETOUR COLIS PAR UPS : OUI/NON' -> (retour_piece, note). AEMSOFT.docx
-    laisse ce champ "à décider selon le besoin réel" sans préciser de
-    source -- cette ligne, quand présente dans le mail, est une source
-    fiable et explicite. Retourne ("", "") si absente du mail.
-    """
     if not texte_mail:
         return "", ""
     match = RE_RETOUR_COLIS_UPS.search(texte_mail)
@@ -261,12 +236,6 @@ def extraire_retour_colis_ups(texte_mail: str) -> tuple[str, str]:
 
 
 def extraire_hotline_aem(texte_mail: str) -> tuple[str, str]:
-    """
-    Numéro de la Hotline AEM SOFTS à appeler à l'arrivée sur site (+
-    horaires si présents). Ce numéro est SPÉCIFIQUE à chaque mail
-    (contrairement au contact générique "Amine" du rappel ATTENTION_AEM,
-    fixe) -- à privilégier quand présent. Retourne ("", "") si absent.
-    """
     if not texte_mail:
         return "", ""
     match_numero = RE_HOTLINE_ARRIVEE.search(texte_mail)
@@ -276,36 +245,17 @@ def extraire_hotline_aem(texte_mail: str) -> tuple[str, str]:
     return numero, horaire
 
 
-# --------------------------------------------------------------------------
-# Helpers de déduction / construction
-# --------------------------------------------------------------------------
-
 def deduire_niveau_service(type_intervention: str) -> str:
-    """
-    NIVEAU DE SERVICE (AEMSOFT.docx) :
-    "Date imposée" si Type = "Intervention date imposée", sinon "GTI 1J (5/7)"
-    (couvre "Intervention J+1" et tout type non reconnu).
-    """
     if _normaliser(type_intervention) == _normaliser(TYPE_DATE_IMPOSEE):
         return NIVEAU_SERVICE_DATE_IMPOSEE
     return NIVEAU_SERVICE_GTI_1J
 
 
 def besoin_materiel_ok(sous_type: str) -> bool:
-    """Besoin de matériel = Oui uniquement si pièces expédiées par IRIS."""
     return classifier_sous_type(sous_type) == SOUS_TYPE_IRIS
 
 
 def classifier_sous_type(sous_type: str) -> str:
-    """
-    Classifie un sous-type en l'un des 3 connus (AEM/IRIS/SANS pièce) par
-    MOTS-CLÉS plutôt que par correspondance exacte. Correctif : la
-    formulation varie dans les mails réels (singulier/pluriel, accord) --
-    ex. observé : "Intervention Avec pièce Expédié par AEM" (singulier,
-    accord masculin) vs. le libellé canonique du docx "Intervention AVEC
-    pièces expédiées par AEM" (pluriel, accord féminin) -- une comparaison
-    stricte échouait sur ce cas réel. Retourne "" si non reconnu.
-    """
     texte = _normaliser(sous_type)
     if not texte:
         return ""
@@ -319,10 +269,6 @@ def classifier_sous_type(sous_type: str) -> str:
 
 
 def deduire_duree_defaut(texte_mail: str, problematique: str) -> tuple[str, str]:
-    """
-    Durée moyenne TOKI : 1h, sauf intervention switch/serveur -> 3h.
-    Retourne (valeur_a_appliquer, note_a_journaliser).
-    """
     texte = _normaliser(f"{texte_mail or ''} {problematique or ''}")
     if any(mot in texte for mot in MOTS_CLES_DUREE_LONGUE):
         return "3h", "Durée non précisée dans le mail — 3h appliqué par défaut (switch/serveur, cf. TOKI)."
@@ -330,10 +276,6 @@ def deduire_duree_defaut(texte_mail: str, problematique: str) -> tuple[str, str]
 
 
 def construire_intitule(numero_bdc: str, objet: str) -> str:
-    """
-    Intitulé Pivot : "BDC <numero_bdc> – <objet>".
-    Idempotent : si `objet` commence déjà par "BDC", on ne reconstruit pas.
-    """
     objet = (objet or "").strip()
     if not numero_bdc or not objet:
         return objet
@@ -343,7 +285,6 @@ def construire_intitule(numero_bdc: str, objet: str) -> str:
 
 
 def dedupliquer_lien_procedure(lien: str) -> str:
-    """Ne garde qu'une occurrence de chaque token si le lien est dupliqué."""
     if not lien:
         return lien
     tokens = [t.strip() for t in re.split(r"[\s,;]+", lien) if t.strip()]
@@ -355,7 +296,6 @@ def dedupliquer_lien_procedure(lien: str) -> str:
 
 
 def _ajouter_si_absent(texte_existant: str, bloc: str) -> str:
-    """Ajoute `bloc` à `texte_existant` s'il n'y est pas déjà (idempotence)."""
     if not bloc:
         return texte_existant
     if texte_existant and bloc in texte_existant:
@@ -366,7 +306,6 @@ def _ajouter_si_absent(texte_existant: str, bloc: str) -> str:
 
 
 def enrichir_travail_attendu(existant: str, instruction_tech: str, tracking_ups: str, materiel_ups: str) -> str:
-    """Travail attendu = existant + INSTRUCTION TECH + tracking UPS + matériel UPS + rappel ATTENTION."""
     texte = existant
     if instruction_tech:
         texte = _ajouter_si_absent(texte, instruction_tech.strip())
@@ -378,30 +317,43 @@ def enrichir_travail_attendu(existant: str, instruction_tech: str, tracking_ups:
 
 
 def enrichir_consignes_planification(existant: str, tracking_ups: str) -> str:
-    """Consignes de planification = consigne standard AEM + existant + tracking UPS."""
     texte = _ajouter_si_absent(existant, CONSIGNE_PLANIFICATION_STANDARD)
     if tracking_ups:
         texte = _ajouter_si_absent(texte, f"Suivi colis UPS : {tracking_ups}")
     return texte
 
 
-# --------------------------------------------------------------------------
-# Agent
-# --------------------------------------------------------------------------
+def _formater_recommandations_rule_engine(recommandations) -> str:
+    if not recommandations:
+        return ""
+    lignes = ["🧩 Recommandations du Rule Engine (à vérifier, jamais appliquées automatiquement) :"]
+    for reco in recommandations:
+        lignes.append(
+            f"- Champ '{reco.field}' -> '{reco.value}' "
+            f"(confiance={reco.confidence:.2f}, source={reco.source}) : {reco.reason}"
+        )
+    return "\n".join(lignes)
 
-def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
+
+def enrich_ticket(
+    ticket: Ticket,
+    texte_mail: str = "",
+    rag_decision: RagDecision | None = None,
+    activer_rule_engine: bool = False,
+) -> Ticket:
     """
     Enrichit un Ticket déjà extrait du mail avec les règles métier AEMSOFT.
 
-    Le paramètre texte_mail (optionnel) sert de filet de sécurité pour
-    récupérer, par regex best-effort, des informations que l'extraction
-    Gemini n'a pas forcément de champ dédié pour capturer (numéro de BDC si
-    non déjà nettoyé, tracking UPS, matériel envoyé par le client, outillage
-    requis).
+    `rag_decision` (optionnel) : une RagDecision déjà calculée en amont,
+    transmise telle quelle au Rule Engine si celui-ci est activé.
+
+    `activer_rule_engine` (par défaut False) : si True, exécute
+    rule_engine.executer(ticket, rag_decision) en fin de fonction et
+    ajoute ses recommandations à commentaire_interne -- jamais à un champ
+    métier. Désactivé par défaut pour une rétrocompatibilité totale.
     """
     notes: list[str] = []
 
-    # --- Identité client : France uniquement (TOKI) ---
     ticket.customer.client = "AEM SOFTS"
     ticket.customer.pays = "France"
 
@@ -411,7 +363,6 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
             f"4 chiffres, à vérifier."
         )
 
-    # --- Type d'intervention / Contrat ---
     ticket.intervention.type_intervention = "Contrat"
     if CONTRAT_AEMSOFT:
         ticket.intervention.contrat = CONTRAT_AEMSOFT
@@ -429,12 +380,6 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
             f"part — à confirmer avant saisie, ne pas faire confiance par défaut."
         )
 
-    # --- Typologie : Type / Sous-type / Niveau de service ---
-    # Filet de sécurité : si `type` n'est pas une des 2 valeurs AEMSOFT connues
-    # (cas observé en test : Gemini y met une classification générique comme
-    # "Maintenance" au lieu de "Intervention J+1"/"Intervention date imposée"),
-    # on relit la ligne 'Type :' du mail directement plutôt que de faire
-    # confiance à l'extraction.
     type_reconnu = _normaliser(ticket.intervention.type) in (
         _normaliser(TYPE_J_PLUS_1), _normaliser(TYPE_DATE_IMPOSEE)
     )
@@ -464,7 +409,6 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
     elif not ticket.intervention.sous_type:
         notes.append("Sous-type non renseigné — Besoin de matériel mis à Non par défaut, à vérifier.")
 
-    # --- Numéro de BDC -> Numéro d'incident client + Intitulé ---
     numero_bdc = nettoyer_numero_bdc(ticket.intervention.numero_incident_client) or extraire_numero_bdc(texte_mail)
     if numero_bdc:
         ticket.intervention.numero_incident_client = numero_bdc
@@ -477,7 +421,6 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
 
     ticket.intervention.origine = "Email"
 
-    # --- N° TPV (champ découvert sur un vrai mail, non documenté) ---
     numero_tpv = extraire_numero_tpv(texte_mail)
     if numero_tpv:
         if ticket.intervention.reference_materiel_client and ticket.intervention.reference_materiel_client != numero_tpv:
@@ -489,9 +432,6 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
         else:
             ticket.intervention.reference_materiel_client = numero_tpv
 
-    # --- Problématique : on fait confiance au bloc INSTRUCTION TECH relu tel
-    # quel dans le mail plutôt qu'à l'extraction Gemini, qui peut le scinder
-    # entre Problématique et Travail attendu (cas observé en test).
     instruction_tech = extraire_instruction_tech(texte_mail)
     if instruction_tech:
         if ticket.intervention.problematique and _normaliser(ticket.intervention.problematique) != _normaliser(instruction_tech):
@@ -504,7 +444,6 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
     elif not ticket.intervention.problematique:
         notes.append("Bloc 'INSTRUCTION TECH :' introuvable dans le mail — Problématique à compléter manuellement.")
 
-    # --- Matériel / Livraison ---
     ticket.logistics.besoin_materiel = besoin_materiel_ok(ticket.intervention.sous_type)
     if ticket.logistics.besoin_materiel:
         ticket.logistics.envoi_piece_par = "IRIS"
@@ -538,13 +477,11 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
                 "déjà envoyé par IRIS."
             )
 
-    # --- Durée ---
     if not ticket.procedure.duree:
         duree_defaut, note_duree = deduire_duree_defaut(texte_mail, ticket.intervention.problematique)
         ticket.procedure.duree = duree_defaut
         notes.append(note_duree)
 
-    # --- Travail attendu / Consignes de planification (toujours enrichis) ---
     ticket.procedure.travail_attendu = enrichir_travail_attendu(
         ticket.procedure.travail_attendu,
         ticket.intervention.problematique,
@@ -564,25 +501,29 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
         tracking_ups,
     )
 
-    # --- Règles fixes ---
     ticket.procedure.intervention_sur_site = True
     ticket.procedure.prise_rdv = False
-    ticket.procedure.technicien_anglophone = False  # AEMSOFT = France uniquement
+    ticket.procedure.technicien_anglophone = False
     ticket.procedure.procedure = True
     ticket.procedure.lien_procedure = dedupliquer_lien_procedure(ticket.procedure.lien_procedure)
 
-    # --- Validation ---
     ticket.validation.type_validation = "Client"
     if not ticket.validation.telephone_validation:
         ticket.validation.telephone_validation = ticket.customer.portable or ticket.customer.fixe
         if not ticket.validation.telephone_validation:
             notes.append("Aucun numéro de validation trouvé (ni portable ni fixe) — à compléter manuellement.")
 
-    # --- Consolidation des notes opérateur (toujours visibles dans Streamlit) ---
     if notes:
         bloc_notes = "⚠️ Points à vérifier (générés automatiquement) :\n" + "\n".join(f"- {n}" for n in notes)
         ticket.intervention.commentaire_interne = _ajouter_si_absent(
             ticket.intervention.commentaire_interne, bloc_notes
+        )
+
+    if activer_rule_engine:
+        recommandations = rule_engine.executer(ticket, rag_decision)
+        bloc_recommandations = _formater_recommandations_rule_engine(recommandations)
+        ticket.intervention.commentaire_interne = _ajouter_si_absent(
+            ticket.intervention.commentaire_interne, bloc_recommandations
         )
 
     return ticket
