@@ -3,8 +3,8 @@ Gestion de la navigation de l'application.
 
 Le Navigator est responsable de la page actuellement active.
 
-Responsabilités
-----------------
+## Responsabilités
+
 - Connaître la page courante.
 - Changer de page.
 - Fournir la page active.
@@ -18,12 +18,11 @@ et la couche Session.
 
 from __future__ import annotations
 
-from app.shell import session
+from app.shell.session import SessionManager
 
 from .config import DEFAULT_PAGE_ID
 from .models import Page
 from .registry import PageRegistry
-
 
 _SESSION_KEY = "current_page"
 
@@ -33,7 +32,11 @@ class Navigator:
     Gestionnaire de la navigation de l'application.
     """
 
-    def __init__(self, registry: PageRegistry) -> None:
+    def __init__(
+        self,
+        registry: PageRegistry,
+        session: SessionManager,
+    ) -> None:
         """
         Initialise le navigateur.
 
@@ -41,17 +44,21 @@ class Navigator:
         ----------
         registry : PageRegistry
             Registre des pages disponibles.
+
+        session : SessionManager
+            Gestionnaire de la session applicative.
         """
         self._registry = registry
+        self._session = session
 
-        if not session.has(_SESSION_KEY):
-            session.set(_SESSION_KEY, DEFAULT_PAGE_ID)
+        if not self._session.exists(_SESSION_KEY):
+            self._session.set(_SESSION_KEY, DEFAULT_PAGE_ID)
 
     def current_page_id(self) -> str:
         """
         Retourne l'identifiant de la page active.
         """
-        return session.get(_SESSION_KEY)
+        return self._session.get(_SESSION_KEY)
 
     def current_page(self) -> Page:
         """
@@ -69,21 +76,21 @@ class Navigator:
             Si la page demandée n'existe pas.
         """
         self._registry.get(page_id)
-        session.set(_SESSION_KEY, page_id)
+        self._session.set(_SESSION_KEY, page_id)
 
     def reset(self) -> None:
         """
         Réinitialise la navigation sur la page par défaut.
         """
-        session.set(_SESSION_KEY, DEFAULT_PAGE_ID)
+        self._session.set(_SESSION_KEY, DEFAULT_PAGE_ID)
 
-def pages(self) -> tuple[Page, ...]:
-    """
-    Retourne les pages enregistrées.
+    def pages(self) -> tuple[Page, ...]:
+        """
+        Retourne les pages enregistrées.
 
-    Returns
-    -------
-    tuple[Page, ...]
-        Ensemble des pages disponibles.
-    """
-    return self._registry.get_all()
+        Returns
+        -------
+        tuple[Page, ...]
+            Ensemble des pages disponibles.
+        """
+        return self._registry.get_all()

@@ -37,3 +37,4 @@ class PageRenderError(PageError):
     Levée lorsqu'une erreur survient pendant le rendu
     d'une page.
     """
+

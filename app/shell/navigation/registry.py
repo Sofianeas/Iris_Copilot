@@ -88,3 +88,21 @@ class PageRegistry:
         Supprime toutes les pages du registre.
         """
         self._pages.clear()
+
+def create_registry() -> PageRegistry:
+    """
+    Construit le registre des pages de l'application.
+
+    Cette fonction constitue le point d'entrée officiel pour
+    l'initialisation du registre.
+
+    Les différentes pages de l'application seront enregistrées
+    progressivement au fur et à mesure de leur implémentation.
+    """
+
+    registry = PageRegistry()
+
+    # Enregistrement des pages
+    # À compléter progressivement.
+
+    return registry

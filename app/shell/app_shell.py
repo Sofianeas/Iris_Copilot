@@ -41,7 +41,12 @@ class ApplicationShell:
         # Infrastructure
         self.session: SessionManager = SessionManager()
         self.registry: PageRegistry = create_registry()
-        self.navigator: Navigator = Navigator(self.registry)
+
+        self.navigator: Navigator = Navigator(
+            registry=self.registry,
+            session=self.session,
+        )
+
         self.layout: Layout = Layout(self.navigator)
 
     def initialize(self) -> None:

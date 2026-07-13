@@ -10,10 +10,11 @@ API stable pour le reste du projet.
 
 from .models import Page
 from .navigator import Navigator
-from .registry import PageRegistry
+from .registry import PageRegistry, create_registry
 
 __all__ = (
     "Navigator",
     "Page",
     "PageRegistry",
+    "create_registry",
 )
