@@ -4,8 +4,8 @@ Initialisation du registre des pages.
 Ce module construit et initialise le registre central de
 navigation de l'application.
 
-Responsabilités
-----------------
+## Responsabilités
+
 - Créer une instance de PageRegistry.
 - Enregistrer les pages disponibles.
 - Retourner un registre prêt à être utilisé.
