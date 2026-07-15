@@ -15,6 +15,7 @@ from .exceptions import (
 from .interfaces import Page
 from .page_context import PageContext
 from .page_factory import PageFactory
+from .page_resolver import PageResolver
 
 __all__ = [
     "BasePage",
@@ -25,4 +26,5 @@ __all__ = [
     "PageInitializationError",
     "PageRenderError",
     "PageFactory",
+    "PageResolver",
 ]

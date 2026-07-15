@@ -8,9 +8,10 @@ Les modules internes restent encapsulés afin de garantir une
 API stable pour le reste du projet.
 """
 
+from .bootstrap import create_registry
 from .models import Page
 from .navigator import Navigator
-from .registry import PageRegistry, create_registry
+from .registry import PageRegistry
 
 __all__ = (
     "Navigator",

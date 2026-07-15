@@ -17,6 +17,11 @@ from __future__ import annotations
 
 from app.shell.navigation import Navigator
 
+from pages.base import (
+    PageFactory,
+    PageResolver,
+)
+
 from .config import (
     SHOW_FOOTER,
     SHOW_HEADER,
@@ -28,13 +33,12 @@ from .header import Header
 from .sidebar import Sidebar
 from .workspace import Workspace
 
-
 class Layout:
     """
     Layout principal de l'application.
     """
 
-    def __init__(self, navigator: Navigator) -> None:
+    def __init__(self, navigator: Navigator, page_factory: PageFactory, page_resolver: PageResolver,) -> None:
         """
         Initialise les composants du Layout.
 
@@ -45,7 +49,7 @@ class Layout:
         """
         self._header = Header()
         self._sidebar = Sidebar(navigator)
-        self._workspace = Workspace(navigator)
+        self._workspace = Workspace(navigator=navigator,page_factory=page_factory,page_resolver=page_resolver,)
         self._footer = Footer()
 
     def render(self) -> None:

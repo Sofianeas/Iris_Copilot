@@ -20,6 +20,12 @@ from .layout import Layout
 from .navigation import Navigator, PageRegistry, create_registry
 from .session import SessionManager
 
+from pages.base import (
+    PageContext,
+    PageFactory,
+    PageResolver,
+)
+
 
 class ApplicationShell:
     """
@@ -38,16 +44,41 @@ class ApplicationShell:
         """
         self._initialized = False
 
+        # ------------------------------------------------------------------
         # Infrastructure
+        # ------------------------------------------------------------------
+
         self.session: SessionManager = SessionManager()
+
         self.registry: PageRegistry = create_registry()
 
         self.navigator: Navigator = Navigator(
-            registry=self.registry,
-            session=self.session,
+        registry=self.registry,
+        session=self.session,
         )
 
-        self.layout: Layout = Layout(self.navigator)
+        # ------------------------------------------------------------------
+        # Framework des Pages (Composition Root)
+        # ------------------------------------------------------------------
+
+        self.page_context = PageContext(
+             navigator=self.navigator,
+             session=self.session,
+        )
+
+        self.page_factory = PageFactory(self.page_context)
+
+        self.page_resolver = PageResolver()
+
+        # ------------------------------------------------------------------
+        # Layout
+        # ------------------------------------------------------------------
+
+        self.layout: Layout = Layout(
+             navigator=self.navigator,
+             page_factory=self.page_factory,
+             page_resolver=self.page_resolver,
+        )
 
     def initialize(self) -> None:
         """

@@ -157,6 +157,18 @@ def enrich_ticket(
     rag_decision: RagDecision | None = None,
     activer_rule_engine: bool = False,
 ) -> Ticket:
+    """
+    Enrichit un Ticket déjà extrait du mail avec les règles métier
+    spécifiques à ADOPT.
+
+    `rag_decision` (optionnel) : une RagDecision déjà calculée en amont,
+    transmise telle quelle au Rule Engine si celui-ci est activé.
+
+    `activer_rule_engine` (par défaut False) : si True, exécute
+    rule_engine.executer(ticket, rag_decision) et ajoute ses
+    recommandations à commentaire_interne -- jamais à un champ métier.
+    Actif dans LES DEUX branches de sortie (cas normal et cas CATO).
+    """
     notes: list[str] = []
 
     ticket.customer.client = "ADOPT"
