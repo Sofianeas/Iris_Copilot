@@ -13,34 +13,29 @@ et une condition dans get_groupe(), sans toucher au reste.
 
 --- Version durcie (relecture post-AEMSOFT/AMPLIFON/ADOPT/etc.) ---
 Corrige, par rapport à la version initiale :
-  1. Code postal / téléphone FR : aucune normalisation déterministe
-     n'existait dans ce fichier (4->5 chiffres, 9->10 chiffres,
-     cf. BARRON_MAC_CANN.docx) -> ajoutée en Python pur, plus fiable que
-     de compter sur l'IA pour s'en souvenir à chaque extraction.
-  2. Traduction Problématique/Travail attendu : une vraie traduction n'est
-     pas une règle déterministe -> on détecte plutôt si le texte SEMBLE
-     anglais (heuristique mots courants) et on flague pour traduction
-     manuelle, on ne fabrique jamais de traduction.
-  3. PED->TPE ne touchait pas `intitule`, alors que la règle est annoncée
-     comme universelle dans le docx (pas limitée à certains champs) ->
-     étendu. Volontairement PAS appliqué à `numero_serie`/
-     `reference_materiel_client` (identifiants exacts, pas du texte
-     descriptif -> remplacer un sous-texte "PED" y serait risqué).
-  4. `remplacer_ped_par_tpe` ne gérait que 3 variantes de casse exactes
-     -> remplacé par une regex insensible à la casse avec limites de mots
-     (`\\bped\\b`), plus robuste.
-  5. Ajout du système de `notes` consolidées dans `commentaire_interne`,
-     pour rester cohérent avec les agents écrits depuis (aemsoft/amplifon/
-     adopt/etc.) -- aucune déduction n'était signalée à l'utilisateur
-     auparavant.
-  6. `normaliser_sous_type` retombait sur le texte brut en silence si
-     aucun libellé Pivot connu n'était reconnu -> désormais flagué.
+  1. Code postal / téléphone FR : normalisation déterministe ajoutée.
+  2. Traduction Problématique/Travail attendu : jamais fabriquée, uniquement
+     un flag heuristique pour traduction manuelle.
+  3. PED->TPE étendu à `intitule` (règle universelle du docx).
+  4. `remplacer_ped_par_tpe` : regex insensible à la casse, limites de mots.
+  5. Système de `notes` consolidées dans `commentaire_interne`.
+  6. `normaliser_sous_type` : sous-type non reconnu désormais flagué.
+
+--- Intégration Rule Engine (cette étape) ---
+  7. Ajout de 2 paramètres optionnels à `enrich_ticket` :
+     `rag_decision: RagDecision | None = None` et
+     `activer_rule_engine: bool = False`. Désactivé par défaut :
+     rétrocompatibilité totale. BARRON n'a qu'UN SEUL point de sortie
+     (contrairement à ADOPT/BUT) : le bloc Rule Engine n'est ajouté
+     qu'une fois, en fin de fonction.
 """
 
 import re
 import unicodedata
 
 from app.models.ticket import Ticket
+from app.models.rag_decision import RagDecision
+from app.services import rule_engine
 
 
 def _sans_accents(texte: str) -> str:
@@ -73,10 +68,23 @@ def _ajouter_si_absent(texte_existant: str, bloc: str) -> str:
     return bloc
 
 
-# Pays/territoires francophones reconnus (codes ISO et noms usuels,
-# en minuscules pour comparaison insensible à la casse).
-# Pour ces pays -> technicien_anglophone = False.
-# Tout pays absent de cette liste -> technicien_anglophone = True.
+def _formater_recommandations_rule_engine(recommandations) -> str:
+    """
+    Formate les RuleRecommendation (rule_engine.executer) en un bloc de
+    texte destiné à commentaire_interne -- ne modifie JAMAIS un champ
+    métier directement (même politique que sur les autres agents migrés).
+    """
+    if not recommandations:
+        return ""
+    lignes = ["🧩 Recommandations du Rule Engine (à vérifier, jamais appliquées automatiquement) :"]
+    for reco in recommandations:
+        lignes.append(
+            f"- Champ '{reco.field}' -> '{reco.value}' "
+            f"(confiance={reco.confidence:.2f}, source={reco.source}) : {reco.reason}"
+        )
+    return "\n".join(lignes)
+
+
 PAYS_FRANCOPHONES = {
     "fr", "france",
     "be", "belgique", "belgium",
@@ -89,8 +97,7 @@ PAYS_FRANCOPHONES = {
 def est_pays_francophone(pays: str) -> bool:
     """
     Détermine si un pays est francophone à partir de PAYS_FRANCOPHONES.
-    Un pays vide/non renseigné est considéré francophone par défaut
-    (hypothèse raisonnable : la majorité des tickets Barron sont en France).
+    Un pays vide/non renseigné est considéré francophone par défaut.
     """
     pays_normalise = _normaliser(pays)
     if not pays_normalise:
@@ -99,11 +106,7 @@ def est_pays_francophone(pays: str) -> bool:
 
 
 def est_france(pays: str) -> bool:
-    """
-    Spécifiquement la France (pas la francophonie au sens large) -- utilisé
-    pour les règles BARRON_MAC_CANN.docx limitées à la France : normalisation
-    CP/téléphone, et Problématique français-uniquement vs. français+anglais.
-    """
+    """Spécifiquement la France (pas la francophonie au sens large)."""
     return _normaliser(pays) in ("fr", "france")
 
 
@@ -123,11 +126,6 @@ def normaliser_telephone_fr(numero: str) -> str:
     return (numero or "").strip()
 
 
-# --------------------------------------------------------------------------
-# Détection heuristique "texte en anglais" (pour flag de traduction,
-# jamais pour fabriquer une traduction -- cf. point 2 du docstring)
-# --------------------------------------------------------------------------
-
 MOTS_ANGLAIS_COURANTS = (
     " the ", " and ", " please ", " replace ", " faulty ", " required ",
     " engineer ", " store ", " issue ", " request ", " unit ", " return ",
@@ -140,10 +138,6 @@ def semble_en_anglais(texte: str) -> bool:
     return any(mot in texte_normalise for mot in MOTS_ANGLAIS_COURANTS)
 
 
-# --------------------------------------------------------------------------
-# Référentiel des contrats Barron (issu de Pivot, capture du 22/06/2026)
-# --------------------------------------------------------------------------
-
 BARRON_CONTRACTS = {
     "PRICING_FR": {
         "contrat": "OD.BARRONM16.001.1 - Pricing FR - NBD SLA (ON DEMAND)",
@@ -154,63 +148,45 @@ BARRON_CONTRACTS = {
     "SMYTHS": {
         "contrat": "IM.BARRONM16.001.1 - IMAC Smyths Toys (IMAC)",
         "type": "ON DEMAND-IMAC",
-        "sous_type": "",  # déduit du mail : "CAISSES ET PERIPHERIQUE" ou "INSTALLATION MAGASIN"
+        "sous_type": "",
         "categorie": "",
     },
     "CLAIRES": {
         "contrat": "IM.BARRONM16.002.1 - CLAIRE'S FRANCE (IMAC)",
         "type": "ON DEMAND-CLAIRES",
-        "sous_type": "",  # déduit du mail, voir SOUS_TYPES_CLAIRES ci-dessous
+        "sous_type": "",
         "categorie": "",
     },
 }
 
-# Sous-types possibles pour Claire's (libellés exacts Pivot).
-# Utilisé pour valider/normaliser ce que l'IA a déduit du mail.
 SOUS_TYPES_CLAIRES = {
     "INSTALLATION MAGASIN": "ON DEMAND - Installation Magasin",
     "DEMONTAGE MAGASIN": "ON DEMAND - Demontage Magasin",
     "RELOCALISATION (REMODELING)": "ON DEMAND - Relocalisation (Remodeling)",
 }
 
-# Sous-types possibles pour Smyths Toys (libellés exacts Pivot).
 SOUS_TYPES_SMYTHS = {
     "CAISSES ET PERIPHERIQUE": "CAISSES ET PERIPHERIQUE",
     "INSTALLATION MAGASIN": "INSTALLATION MAGASIN",
 }
 
-# Enseignes explicitement rattachées à Smyths Toys / Claire's.
-# Toute enseigne absente de ces deux listes tombe dans PRICING_FR
-# (comportement documenté, pas une supposition -- cf. docx).
 ENSEIGNES_SMYTHS = {"smyths toys", "smyths"}
 ENSEIGNES_CLAIRES = {"claire's", "claires", "claire's france"}
 
 
 def get_groupe(enseigne: str) -> str:
-    """
-    Détermine le groupe contractuel Barron à partir de l'enseigne.
-    Par défaut (toute enseigne non reconnue) -> PRICING_FR (comportement
-    documenté dans le docx : "Pricing FR... pour tous les magasins SAUF
-    Smyths Toys ou Claire's", pas une supposition non vérifiée).
-    """
+    """Détermine le groupe contractuel Barron à partir de l'enseigne. Défaut : PRICING_FR."""
     enseigne_normalisee = (enseigne or "").strip().lower()
 
     if enseigne_normalisee in ENSEIGNES_SMYTHS:
         return "SMYTHS"
-
     if enseigne_normalisee in ENSEIGNES_CLAIRES:
         return "CLAIRES"
-
     return "PRICING_FR"
 
 
 def normaliser_sous_type(groupe: str, sous_type_brut: str) -> tuple[str, bool]:
-    """
-    Convertit un sous-type déduit par l'IA (texte libre, ex: "installation")
-    vers le libellé exact attendu par Pivot, si on le reconnaît.
-    Retourne (valeur, reconnu) -- reconnu=False si on retombe sur le texte
-    brut tel quel faute de correspondance (à signaler, cf. point 6).
-    """
+    """Convertit un sous-type déduit par l'IA vers le libellé exact Pivot si reconnu."""
     if not sous_type_brut:
         return "", False
 
@@ -226,11 +202,7 @@ def normaliser_sous_type(groupe: str, sous_type_brut: str) -> tuple[str, bool]:
 
 
 def deduire_nombre_techniciens(ticket: Ticket) -> tuple[int, str]:
-    """
-    Règle : si le texte mentionne un écran à partir de 43 pouces,
-    on passe à 2 techniciens. Sinon on garde la valeur déjà présente
-    (issue du mail), avec 1 par défaut. Retourne (nombre, note_si_deduit).
-    """
+    """Règle : écran à partir de 43 pouces -> 2 techniciens."""
     texte_a_verifier = " ".join([
         ticket.procedure.travail_attendu or "",
         ticket.procedure.consignes_mission or "",
@@ -247,51 +219,46 @@ def deduire_nombre_techniciens(ticket: Ticket) -> tuple[int, str]:
 
 
 def remplacer_ped_par_tpe(texte: str) -> str:
-    """
-    Chez Barron, 'PED' désigne toujours un TPE en France.
-    Regex insensible à la casse avec limites de mots (plus robuste que
-    3 variantes de casse exactes -- cf. point 4 du docstring).
-    """
+    """Chez Barron, 'PED' désigne toujours un TPE en France."""
     if not texte:
         return texte
     return re.sub(r"\bped\b", "TPE", texte, flags=re.IGNORECASE)
 
 
 def fusionner_references_incident(ticket: Ticket) -> str:
-    """
-    Construit le numéro d'incident client au format exigé par Barron :
-    "[Barron McCann Reference] – [Customer Ref]"
-    Ex: "WOT0017951 – INC0529843"
-
-    La référence Barron McCann est temporairement stockée dans
-    ticket.intervention.code_projet par le prompt d'extraction
-    (champ neutre, non utilisé ailleurs pour ce client).
-    La Customer Ref est déjà dans ticket.intervention.numero_incident_client.
-    """
+    """Construit '[Barron McCann Reference] – [Customer Ref]'."""
     reference_barron = (ticket.intervention.code_projet or "").strip()
     reference_client = (ticket.intervention.numero_incident_client or "").strip()
 
     if reference_barron and reference_client:
         return f"{reference_barron} – {reference_client}"
-
-    # Si une seule des deux références est présente, on la garde telle quelle
     return reference_barron or reference_client
 
 
-def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
+def enrich_ticket(
+    ticket: Ticket,
+    texte_mail: str = "",
+    rag_decision: RagDecision | None = None,
+    activer_rule_engine: bool = False,
+) -> Ticket:
     """
     Enrichit un Ticket déjà extrait du mail avec les règles métier
     spécifiques à Barron McCann.
+
+    `rag_decision` (optionnel) : une RagDecision déjà calculée en amont,
+    transmise telle quelle au Rule Engine si celui-ci est activé.
+
+    `activer_rule_engine` (par défaut False) : si True, exécute
+    rule_engine.executer(ticket, rag_decision) et ajoute ses
+    recommandations à commentaire_interne -- jamais à un champ métier.
     """
     notes: list[str] = []
 
-    # --- Informations client fixes ---
     ticket.customer.client = "BARRON MAC CANN LTD"
     ticket.customer.numero_client = "BARRONM16"
 
     pays = ticket.customer.pays
 
-    # --- Normalisation FR (code postal / téléphone) ---
     if est_france(pays):
         if ticket.customer.code_postal:
             ticket.customer.code_postal = normaliser_code_postal_fr(ticket.customer.code_postal)
@@ -300,7 +267,6 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
         if ticket.customer.fixe:
             ticket.customer.fixe = normaliser_telephone_fr(ticket.customer.fixe)
 
-    # --- Détermination du groupe contractuel selon l'enseigne ---
     groupe = get_groupe(ticket.customer.enseigne)
     infos_contrat = BARRON_CONTRACTS[groupe]
 
@@ -309,9 +275,6 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
     ticket.intervention.type = infos_contrat["type"]
     ticket.intervention.categorie = infos_contrat["categorie"]
 
-    # Sous-type : fixe pour Pricing FR (toujours "TPE").
-    # Pour Smyths/Claire's, on normalise ce que l'IA a déduit du mail
-    # vers le libellé exact attendu par Pivot.
     if infos_contrat["sous_type"]:
         ticket.intervention.sous_type = infos_contrat["sous_type"]
     else:
@@ -325,43 +288,31 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
         elif not sous_type_normalise:
             notes.append(f"Sous-type introuvable dans le mail pour le groupe {groupe} — à compléter manuellement.")
 
-    # --- Fusion des 2 références en un seul numéro d'incident client ---
-    # IMPORTANT : fait avant de vider code_projet (qui servait de stockage temporaire).
     if not ticket.intervention.code_projet and not ticket.intervention.numero_incident_client:
         notes.append("Ni 'Barron McCann Reference' ni 'Customer Ref' trouvées — Numéro d'incident client à compléter manuellement.")
     ticket.intervention.numero_incident_client = fusionner_references_incident(ticket)
-    ticket.intervention.code_projet = ""  # champ neutre, on le nettoie après usage
+    ticket.intervention.code_projet = ""
 
-    # --- Règles transverses ---
     ticket.intervention.origine = "Email"
     ticket.procedure.intervention_sur_site = True
     ticket.procedure.prise_rdv = False
     ticket.procedure.procedure = True
     ticket.validation.type_validation = "Client"
 
-    # Technicien anglophone : Non si pays francophone (France, Belgique,
-    # Suisse, Luxembourg, Monaco), Oui sinon.
     if not pays:
         notes.append("Pays non renseigné — francophone supposé par défaut (technicien_anglophone=Non), à vérifier.")
     ticket.procedure.technicien_anglophone = not est_pays_francophone(pays)
 
-    # Nombre de techniciens (règle écran 43'')
     nombre_techniciens, note_deduction = deduire_nombre_techniciens(ticket)
     ticket.procedure.nombre_techniciens = nombre_techniciens
     if note_deduction:
         notes.append(note_deduction)
 
-    # --- Remplacement PED -> TPE (règle universelle, cf. point 3) ---
-    # Volontairement PAS appliqué à numero_serie / reference_materiel_client :
-    # ce sont des identifiants exacts, pas du texte descriptif.
     ticket.intervention.problematique = remplacer_ped_par_tpe(ticket.intervention.problematique)
     ticket.intervention.intitule = remplacer_ped_par_tpe(ticket.intervention.intitule)
     ticket.procedure.travail_attendu = remplacer_ped_par_tpe(ticket.procedure.travail_attendu)
     ticket.procedure.consignes_mission = remplacer_ped_par_tpe(ticket.procedure.consignes_mission)
 
-    # --- Langue (Problématique français-only si France, sinon FR+EN ;
-    # Travail attendu toujours traduit en français) -- jamais de traduction
-    # fabriquée, uniquement un flag pour traduction manuelle (cf. point 2) ---
     if est_france(pays) and semble_en_anglais(ticket.intervention.problematique):
         notes.append(
             "Problématique semble être en anglais alors que l'intervention est en "
@@ -386,6 +337,13 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
         bloc_notes = "⚠️ Points à vérifier (générés automatiquement) :\n" + "\n".join(f"- {n}" for n in notes)
         ticket.intervention.commentaire_interne = _ajouter_si_absent(
             ticket.intervention.commentaire_interne, bloc_notes
+        )
+
+    if activer_rule_engine:
+        recommandations = rule_engine.executer(ticket, rag_decision)
+        bloc_recommandations = _formater_recommandations_rule_engine(recommandations)
+        ticket.intervention.commentaire_interne = _ajouter_si_absent(
+            ticket.intervention.commentaire_interne, bloc_recommandations
         )
 
     return ticket
