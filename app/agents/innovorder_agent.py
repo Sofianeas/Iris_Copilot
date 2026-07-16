@@ -41,12 +41,21 @@ actuel) + TOKI_INNOVORDER.txt (appoint, cf. hypothèse 1 ci-dessous).
      documenté) -> non automatisé, laissé à l'extraction/validation humaine.
   5. Lien de procédure : choix via Token Drive selon le type de panne,
      aucune table panne -> token disponible -> non automatisé (comme BUT).
+
+--- Intégration Rule Engine (cette étape) ---
+  6. Ajout de 2 paramètres optionnels à `enrich_ticket` :
+     `rag_decision: RagDecision | None = None` et
+     `activer_rule_engine: bool = False`. Désactivé par défaut :
+     rétrocompatibilité totale. INNOVORDER n'a qu'UN SEUL point de sortie :
+     le bloc Rule Engine n'est ajouté qu'une fois, en fin de fonction.
 """
 
 import re
 import unicodedata
 
 from app.models.ticket import Ticket
+from app.models.rag_decision import RagDecision
+from app.services import rule_engine
 
 
 def _sans_accents(texte: str) -> str:
@@ -75,6 +84,23 @@ def _ajouter_si_absent(texte_existant: str, bloc: str) -> str:
     return bloc
 
 
+def _formater_recommandations_rule_engine(recommandations) -> str:
+    """
+    Formate les RuleRecommendation (rule_engine.executer) en un bloc de
+    texte destiné à commentaire_interne -- ne modifie JAMAIS un champ
+    métier directement (même politique que sur les autres agents migrés).
+    """
+    if not recommandations:
+        return ""
+    lignes = ["🧩 Recommandations du Rule Engine (à vérifier, jamais appliquées automatiquement) :"]
+    for reco in recommandations:
+        lignes.append(
+            f"- Champ '{reco.field}' -> '{reco.value}' "
+            f"(confiance={reco.confidence:.2f}, source={reco.source}) : {reco.reason}"
+        )
+    return "\n".join(lignes)
+
+
 # --------------------------------------------------------------------------
 # Référentiel INNOVORDER
 # --------------------------------------------------------------------------
@@ -94,16 +120,10 @@ MOTS_CLES_DOMTOM = (
 RE_DIGITS_DEBUT = re.compile(r"^\s*(\d+)")
 
 
-# --------------------------------------------------------------------------
-# Helpers de détection / construction
-# --------------------------------------------------------------------------
-
 def detecter_contrat(texte_mail: str) -> tuple[str, bool]:
     """
     Déduit le Contrat (Maintenance France / IMAC France / IMAC DOM-TOM /
-    Logistique France). Retourne (contrat, detecte_explicitement) --
-    detecte_explicitement=False si on retombe sur Maintenance France par
-    défaut faute de mot-clé IMAC/Logistique (cf. hardening).
+    Logistique France). Retourne (contrat, detecte_explicitement).
     """
     texte = _normaliser(texte_mail)
     if "logistique" in texte:
@@ -112,14 +132,11 @@ def detecter_contrat(texte_mail: str) -> tuple[str, bool]:
         if any(mot in texte for mot in MOTS_CLES_DOMTOM):
             return CONTRAT_IMAC_DOMTOM, True
         return CONTRAT_IMAC_FRANCE, True
-    return CONTRAT_MAINTENANCE_FRANCE, False  # cas le plus documenté, retenu par défaut
+    return CONTRAT_MAINTENANCE_FRANCE, False
 
 
 def extraire_enseigne_depuis_intitule(intitule_brut: str) -> str:
-    """
-    Isole l'enseigne depuis "Intitulé de la demande", avant le 1er tiret.
-    Ex. "Bagel corner Biganos - Demande intervention urgente" -> "BAGEL CORNER BIGANOS"
-    """
+    """Isole l'enseigne depuis "Intitulé de la demande", avant le 1er tiret."""
     if not intitule_brut:
         return ""
     segment = re.split(r"\s[-–]\s", intitule_brut)[0]
@@ -127,19 +144,29 @@ def extraire_enseigne_depuis_intitule(intitule_brut: str) -> str:
 
 
 def extraire_numero_incident_depuis_objet(texte_mail: str) -> str:
-    """Chiffres en tout début de l'objet du mail (filet de sécurité, cf. hypothèse 3)."""
+    """Chiffres en tout début de l'objet du mail (filet de sécurité)."""
     if not texte_mail:
         return ""
     match = RE_DIGITS_DEBUT.match(texte_mail.strip())
     return match.group(1) if match else ""
 
 
-# --------------------------------------------------------------------------
-# Agent
-# --------------------------------------------------------------------------
+def enrich_ticket(
+    ticket: Ticket,
+    texte_mail: str = "",
+    rag_decision: RagDecision | None = None,
+    activer_rule_engine: bool = False,
+) -> Ticket:
+    """
+    Enrichit un Ticket déjà extrait du mail avec les règles métier INNOVORDER.
 
-def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
-    """Enrichit un Ticket déjà extrait du mail avec les règles métier INNOVORDER."""
+    `rag_decision` (optionnel) : une RagDecision déjà calculée en amont,
+    transmise telle quelle au Rule Engine si celui-ci est activé.
+
+    `activer_rule_engine` (par défaut False) : si True, exécute
+    rule_engine.executer(ticket, rag_decision) et ajoute ses
+    recommandations à commentaire_interne -- jamais à un champ métier.
+    """
     notes: list[str] = []
 
     ticket.customer.client = "INNOVORDER"
@@ -167,7 +194,7 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
         ticket.intervention.type = "Autre"
         ticket.intervention.type_ticket = "Incident"
         ticket.intervention.niveau_priorite = NIVEAU_SERVICE_MAINTENANCE
-        ticket.procedure.technicien_anglophone = False  # contrat France uniquement
+        ticket.procedure.technicien_anglophone = False
         ticket.procedure.intervention_sur_site = True
         ticket.procedure.prise_rdv = False
         ticket.procedure.procedure = True
@@ -217,6 +244,13 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
         bloc_notes = "⚠️ Points à vérifier (générés automatiquement) :\n" + "\n".join(f"- {n}" for n in notes)
         ticket.intervention.commentaire_interne = _ajouter_si_absent(
             ticket.intervention.commentaire_interne, bloc_notes
+        )
+
+    if activer_rule_engine:
+        recommandations = rule_engine.executer(ticket, rag_decision)
+        bloc_recommandations = _formater_recommandations_rule_engine(recommandations)
+        ticket.intervention.commentaire_interne = _ajouter_si_absent(
+            ticket.intervention.commentaire_interne, bloc_recommandations
         )
 
     return ticket
