@@ -28,30 +28,33 @@ Logique métier issue de AMPLIFON.docx + TOKI_AMPLIFON.txt :
   2. AMPLIFON.docx mentionne un bouton ("petit logo") qui auto-remplit le
      ticket dans Pivot une fois le modèle + BDC sélectionnés -> une partie
      de la construction d'Intitulé faite ici (modèles A/B/C/D) pourrait être
-     redondante avec cet auto-remplissage natif. Si Playwright peut se
-     contenter de sélectionner le modèle + déclencher ce bouton plutôt que
-     saisir le texte, cet agent peut être simplifié en conséquence.
+     redondante avec cet auto-remplissage natif.
   3. `intervention.categorie` est réutilisé pour stocker le libellé du
      modèle détecté, faute de champ dédié "modèle d'incident" dans le
      `Ticket` actuel.
   4. Aucun champ dédié pour "Destination" ni "Envoi Express" dans
-     `Logistics` -> combinés dans `consigne_livraison` (ex. "Client — Envoi
-     Express").
-  5. Modèle B (Intitulé "Changement poste...") : faute de champ séparé
-     isolant le texte de l'objet du mail hors BDC, la construction reste
-     un no-op si l'intitulé extrait commence déjà par "changement" — à
-     enrichir si besoin une fois un exemple réel disponible.
-  6. La détection du client AMPLIFON lui-même (dans router_service.py) est
-     plus fragile que pour les autres clients : il n'y a pas de libellé de
-     champ commun aux 4 modèles (contrairement à AEMSOFT par exemple). Je me
-     base sur la présence du mot "amplifon" (nom d'enseigne) + "epson"/
-     "ricoh" pour le modèle D — à renforcer si des faux négatifs apparaissent.
+     `Logistics` -> combinés dans `consigne_livraison`.
+  5. Modèle B : construction en no-op si l'intitulé commence déjà par
+     "changement" — à enrichir une fois un exemple réel disponible.
+  6. La détection du client AMPLIFON dans router_service.py est plus
+     fragile que pour les autres clients — basée sur "amplifon"/"epson"/
+     "ricoh" — à renforcer si des faux négatifs apparaissent.
+
+--- Intégration Rule Engine (cette étape) ---
+  7. Ajout de 2 paramètres optionnels à `enrich_ticket` :
+     `rag_decision: RagDecision | None = None` et
+     `activer_rule_engine: bool = False`. Désactivé par défaut :
+     rétrocompatibilité totale. AMPLIFON n'a qu'UN SEUL point de sortie
+     (les 4 modèles A/B/C/D convergent tous vers le même bloc final) : le
+     bloc Rule Engine n'est ajouté qu'une fois, en fin de fonction.
 """
 
 import re
 import unicodedata
 
 from app.models.ticket import Ticket
+from app.models.rag_decision import RagDecision
+from app.services import rule_engine
 
 
 def _sans_accents(texte: str) -> str:
@@ -80,11 +83,24 @@ def _ajouter_si_absent(texte_existant: str, bloc: str) -> str:
     return bloc
 
 
-# --------------------------------------------------------------------------
-# Référentiel AMPLIFON (issu de AMPLIFON.docx + TOKI_AMPLIFON.txt)
-# --------------------------------------------------------------------------
+def _formater_recommandations_rule_engine(recommandations) -> str:
+    """
+    Formate les RuleRecommendation (rule_engine.executer) en un bloc de
+    texte destiné à commentaire_interne -- ne modifie JAMAIS un champ
+    métier directement (même politique que sur les autres agents migrés).
+    """
+    if not recommandations:
+        return ""
+    lignes = ["🧩 Recommandations du Rule Engine (à vérifier, jamais appliquées automatiquement) :"]
+    for reco in recommandations:
+        lignes.append(
+            f"- Champ '{reco.field}' -> '{reco.value}' "
+            f"(confiance={reco.confidence:.2f}, source={reco.source}) : {reco.reason}"
+        )
+    return "\n".join(lignes)
 
-CONTRAT_AMPLIFON = "IMAC"  # confirmé par TOKI_AMPLIFON.txt
+
+CONTRAT_AMPLIFON = "IMAC"
 
 MODELE_A = "A"
 MODELE_B = "B"
@@ -102,15 +118,10 @@ MOTS_CLES_IMPRIMANTE = ("imprimante", "epson", "ricoh")
 MOTS_CLES_PC_DELL_INTEGRATION = ("changement poste", "changement de poste")
 MOTS_CLES_INTERVENTION_SITE = ("intervention sur site", "intervention site")
 
-# Ricoh 305/306/307 = imprimante de plus de 30kg (cf. AMPLIFON.docx / TOKI)
 RICOH_LOURDS = ("ricoh 305", "ricoh 306", "ricoh 307")
 
 RE_BDC = re.compile(r"\bBDC\b\s*[:\-n°]*\s*(\d+)", re.IGNORECASE)
 
-
-# --------------------------------------------------------------------------
-# Helpers de détection
-# --------------------------------------------------------------------------
 
 def nettoyer_numero_bdc(valeur: str) -> str:
     """Isole les chiffres d'un numéro de BDC, qu'il soit déjà préfixé 'BDC' ou non."""
@@ -126,11 +137,7 @@ def extraire_numero_bdc(texte_mail: str) -> str:
 
 
 def detecter_modele_incident(texte_mail: str) -> str:
-    """
-    Déduit le modèle d'incident AMPLIFON (A/B/C/D) à partir de mots-clés.
-    RECOMMANDATION uniquement (cf. hypothèse 1 du docstring) : ordre de
-    priorité D > B > C, A en dernier recours (cas le plus générique).
-    """
+    """Déduit le modèle d'incident AMPLIFON (A/B/C/D). Ordre : D > B > C, A en dernier recours."""
     texte = _normaliser(texte_mail)
     if any(mot in texte for mot in MOTS_CLES_IMPRIMANTE):
         return MODELE_D
@@ -174,12 +181,7 @@ def extraire_modele_ricoh(texte_mail: str) -> str:
 
 
 def construire_problematique_d(texte_mail: str, avec_reprise: bool) -> str:
-    """
-    D) Problématique : "Installation imprimante [avec/sans reprise]" + marque/
-    modèle de l'imprimante reprise si applicable.
-    Ex. AMPLIFON.docx : "Installation imprimante avec reprise de l'imprimante
-    de +30Kg / Ricoh 305 à reprendre"
-    """
+    """D) "Installation imprimante [avec/sans reprise]" + marque/modèle."""
     base = "Installation imprimante"
     if not avec_reprise:
         return f"{base} sans reprise."
@@ -205,12 +207,8 @@ def normaliser_duree_intervention(duree: str) -> str:
     return ""
 
 
-# --------------------------------------------------------------------------
-# Helpers de construction d'Intitulé (best-effort, cf. hypothèse 2)
-# --------------------------------------------------------------------------
-
 def construire_intitule_a(numero_bdc: str, pieces: str) -> str:
-    """A) "BDC <n> – envoi <pieces>" (ex. 'BDC 4866 – envoi 2 Ecrans DELL')."""
+    """A) "BDC <n> – envoi <pieces>"."""
     pieces = (pieces or "").strip()
     if not numero_bdc or not pieces:
         return ""
@@ -218,10 +216,7 @@ def construire_intitule_a(numero_bdc: str, pieces: str) -> str:
 
 
 def construire_intitule_b(intitule_existant: str) -> str:
-    """
-    B) "Changement poste" + info objet du mail (cf. hypothèse 5 : no-op si
-    l'intitulé extrait commence déjà par 'changement').
-    """
+    """B) "Changement poste" + info objet du mail."""
     return (intitule_existant or "").strip()
 
 
@@ -243,17 +238,21 @@ def construire_intitule_d(numero_bdc: str, avec_reprise: bool) -> str:
     return f"BDC {numero_bdc} – installation Epson {suffixe}"
 
 
-# --------------------------------------------------------------------------
-# Agent
-# --------------------------------------------------------------------------
-
-def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
+def enrich_ticket(
+    ticket: Ticket,
+    texte_mail: str = "",
+    rag_decision: RagDecision | None = None,
+    activer_rule_engine: bool = False,
+) -> Ticket:
     """
     Enrichit un Ticket déjà extrait du mail avec les règles métier AMPLIFON.
 
-    Le modèle d'incident (A/B/C/D) est déduit du contenu du mail puis
-    appliqué — toujours signalé comme une recommandation à confirmer
-    (cf. hypothèse 1 du docstring du module).
+    `rag_decision` (optionnel) : une RagDecision déjà calculée en amont,
+    transmise telle quelle au Rule Engine si celui-ci est activé.
+
+    `activer_rule_engine` (par défaut False) : si True, exécute
+    rule_engine.executer(ticket, rag_decision) et ajoute ses
+    recommandations à commentaire_interne -- jamais à un champ métier.
     """
     notes: list[str] = []
 
@@ -275,7 +274,6 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
     else:
         notes.append("Numéro de BDC introuvable dans l'objet du mail — à compléter manuellement.")
 
-    # --- Modèle d'incident : recommandation, toujours signalée ---
     modele = detecter_modele_incident(texte_mail)
     ticket.intervention.categorie = LIBELLE_MODELE[modele]
     notes.append(
@@ -333,10 +331,7 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
         ticket.procedure.intervention_sur_site = True
         notes.append(
             "Modèle C : aucun défaut documenté pour Nombre de techniciens/Durée si "
-            "absents du mail (contrairement à d'autres clients) — et comme ces champs "
-            "valent déjà 1/vide par défaut dans le Ticket, impossible de distinguer "
-            "automatiquement une vraie valeur extraite d'un défaut non renseigné. "
-            "Vérifier manuellement contre le mail."
+            "absents du mail — vérifier manuellement contre le mail."
         )
 
     elif modele == MODELE_D:
@@ -377,12 +372,17 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
                 "ou reconditionnée (Stock SPARE) — à vérifier."
             )
 
-    # --- Pièces jointes : à rattacher manuellement (pas de champ Documents dans Ticket) ---
-
     if notes:
         bloc_notes = "⚠️ Points à vérifier (générés automatiquement) :\n" + "\n".join(f"- {n}" for n in notes)
         ticket.intervention.commentaire_interne = _ajouter_si_absent(
             ticket.intervention.commentaire_interne, bloc_notes
+        )
+
+    if activer_rule_engine:
+        recommandations = rule_engine.executer(ticket, rag_decision)
+        bloc_recommandations = _formater_recommandations_rule_engine(recommandations)
+        ticket.intervention.commentaire_interne = _ajouter_si_absent(
+            ticket.intervention.commentaire_interne, bloc_recommandations
         )
 
     return ticket
