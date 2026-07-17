@@ -57,6 +57,6 @@ def test_desactive_par_defaut_meme_avec_rag_decision_fournie():
 def test_non_regression_contrat_par_defaut_toujours_signale():
     """Non-régression : le flag 'contrat retenu par défaut' continue de fonctionner, Rule Engine actif ou non."""
     ticket = Ticket()
-    ticket = innovorder_agent.enrich_ticket(ticket, "texte sans mot-cle imac ni logistique", activer_rule_engine=True)
+    ticket = innovorder_agent.enrich_ticket(ticket, "texte de test générique sans mot déclencheur", activer_rule_engine=True)
 
     assert "retenu PAR DÉFAUT" in ticket.intervention.commentaire_interne
