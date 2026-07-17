@@ -36,14 +36,23 @@ donnée dans TOKI -> non mappés, signalés).
      Playwright/UI, pas appliqué à un champ.
   4. Détection du sous-scénario par mots-clés (installation/démontage/
      réinstallation + enseigne) -> toujours signalée comme une
-     recommandation à confirmer, jamais appliquée en silence (même logique
-     que le "modèle d'incident" AMPLIFON).
+     recommandation à confirmer, jamais appliquée en silence.
+
+--- Intégration Rule Engine (cette étape) ---
+  5. Ajout de 2 paramètres optionnels à `enrich_ticket` :
+     `rag_decision: RagDecision | None = None` et
+     `activer_rule_engine: bool = False`. Désactivé par défaut :
+     rétrocompatibilité totale. POS_SERVICE n'a qu'UN SEUL point de
+     sortie : le bloc Rule Engine n'est ajouté qu'une fois, en fin de
+     fonction.
 """
 
 import re
 import unicodedata
 
 from app.models.ticket import Ticket
+from app.models.rag_decision import RagDecision
+from app.services import rule_engine
 
 
 def _sans_accents(texte: str) -> str:
@@ -72,13 +81,30 @@ def _ajouter_si_absent(texte_existant: str, bloc: str) -> str:
     return bloc
 
 
+def _formater_recommandations_rule_engine(recommandations) -> str:
+    """
+    Formate les RuleRecommendation (rule_engine.executer) en un bloc de
+    texte destiné à commentaire_interne -- ne modifie JAMAIS un champ
+    métier directement (même politique que sur les autres agents migrés).
+    """
+    if not recommandations:
+        return ""
+    lignes = ["🧩 Recommandations du Rule Engine (à vérifier, jamais appliquées automatiquement) :"]
+    for reco in recommandations:
+        lignes.append(
+            f"- Champ '{reco.field}' -> '{reco.value}' "
+            f"(confiance={reco.confidence:.2f}, source={reco.source}) : {reco.reason}"
+        )
+    return "\n".join(lignes)
+
+
 # --------------------------------------------------------------------------
 # Référentiel POS SERVICE (issu de TOKI_POS_SERVICE.txt)
 # --------------------------------------------------------------------------
 
 CODE_VERS_ENSEIGNE = {
     "fre": "Maxi Zoo",
-    "bee": "I Am ou Six",  # ambigu dans TOKI -- les 2 enseignes partagent ce code
+    "bee": "I Am ou Six",
     "geo": "Geox",
 }
 CODES_NON_MAPPES = ("ape", "xpl", "sup")
@@ -103,10 +129,6 @@ LIBELLE_SCENARIO = {
 RE_CODE_ENSEIGNE = re.compile(r"\b(fre|bee|geo|ape|xpl|sup)\s*0*(\d+)\b", re.IGNORECASE)
 
 
-# --------------------------------------------------------------------------
-# Helpers de détection
-# --------------------------------------------------------------------------
-
 def detecter_code_et_magasin(texte_mail: str) -> tuple[str, str]:
     """Code enseigne (3 lettres) + numéro de magasin (sans les lettres), cf. TOKI."""
     match = RE_CODE_ENSEIGNE.search(texte_mail or "")
@@ -116,10 +138,7 @@ def detecter_code_et_magasin(texte_mail: str) -> tuple[str, str]:
 
 
 def detecter_scenario(texte_mail: str, code_enseigne: str) -> str:
-    """
-    Déduit le sous-scénario POS SERVICE. RECOMMANDATION uniquement
-    (cf. hypothèse 4) -- toujours signalée, jamais appliquée en silence.
-    """
+    """Déduit le sous-scénario POS SERVICE. RECOMMANDATION uniquement."""
     texte = _normaliser(texte_mail)
     est_maxizoo = code_enseigne == "fre" or "maxi zoo" in texte or "maxizoo" in texte
     est_geox = code_enseigne == "geo" or "geox" in texte
@@ -135,12 +154,22 @@ def detecter_scenario(texte_mail: str, code_enseigne: str) -> str:
     return SCENARIO_AUTRE_MAINTENANCE
 
 
-# --------------------------------------------------------------------------
-# Agent
-# --------------------------------------------------------------------------
+def enrich_ticket(
+    ticket: Ticket,
+    texte_mail: str = "",
+    rag_decision: RagDecision | None = None,
+    activer_rule_engine: bool = False,
+) -> Ticket:
+    """
+    Enrichit un Ticket déjà extrait du mail avec les règles métier POS SERVICE.
 
-def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
-    """Enrichit un Ticket déjà extrait du mail avec les règles métier POS SERVICE."""
+    `rag_decision` (optionnel) : une RagDecision déjà calculée en amont,
+    transmise telle quelle au Rule Engine si celui-ci est activé.
+
+    `activer_rule_engine` (par défaut False) : si True, exécute
+    rule_engine.executer(ticket, rag_decision) et ajoute ses
+    recommandations à commentaire_interne -- jamais à un champ métier.
+    """
     notes: list[str] = []
 
     ticket.customer.client = "POS SERVICE"
@@ -171,7 +200,7 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
 
     if scenario == SCENARIO_MAXIZOO_MAINTENANCE:
         ticket.intervention.contrat = CONTRAT_MAINTENANCE
-        ticket.logistics.besoin_materiel = False  # IRIS ne gère plus le stock pour Maxi Zoo
+        ticket.logistics.besoin_materiel = False
         ticket.procedure.contrainte = "Intervention à partir de 10h00 (Maxi Zoo)"
         ticket.procedure.consignes_planification = _ajouter_si_absent(
             ticket.procedure.consignes_planification,
@@ -203,7 +232,7 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
         ticket.procedure.nombre_techniciens = 1
         ticket.procedure.duree = "2h"
         ticket.procedure.technicien_anglophone = True
-        ticket.procedure.procedure = False  # "pas de procédure" explicitement (cf. TOKI)
+        ticket.procedure.procedure = False
         ticket.procedure.intervention_sur_site = True
         ticket.logistics.commentaire_logistique = _ajouter_si_absent(
             ticket.logistics.commentaire_logistique,
@@ -224,6 +253,13 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
         bloc_notes = "⚠️ Points à vérifier (générés automatiquement) :\n" + "\n".join(f"- {n}" for n in notes)
         ticket.intervention.commentaire_interne = _ajouter_si_absent(
             ticket.intervention.commentaire_interne, bloc_notes
+        )
+
+    if activer_rule_engine:
+        recommandations = rule_engine.executer(ticket, rag_decision)
+        bloc_recommandations = _formater_recommandations_rule_engine(recommandations)
+        ticket.intervention.commentaire_interne = _ajouter_si_absent(
+            ticket.intervention.commentaire_interne, bloc_recommandations
         )
 
     return ticket
