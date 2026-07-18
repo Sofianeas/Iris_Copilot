@@ -29,29 +29,34 @@ Logique métier issue de BUT.docx + TOKI_BUT.txt :
   1. TOKI_BUT.txt référence des lettres (A/B/C/D) pointant vers une image/
      capture d'écran absente du texte fourni. Déduction par contexte :
      A = Numéro d'incident client, B = Code site, C = Modèle du matériel
-     concerné, D = Numéro de série. À CONFIRMER — si l'un de ces mappings
-     est faux, l'Intitulé et le N° incident client construits ici le seront
-     aussi.
-  2. Libellés de contrat Onduleur/Switch déduits par symétrie de nommage
-     ("CT.BUTINT17.001.1 - CONTRAT AU CALL ONDULEUR" / "... SWITCH") — seul
-     le libellé Switch est donné littéralement dans TOKI, celui d'Onduleur
-     est une extrapolation à confirmer dans Pivot.
-  3. Le numéro de caisse ("N° de la caisse", utilisé dans l'Intitulé
-     encaissement) n'a pas de champ dédié dans le `Ticket` -> extrait par
-     regex best-effort depuis texte_mail (ex. "caisse n°1"), peut échouer
-     si la formulation diffère.
-  4. Choix entre les 2 références Switch (Aruba 6000 vs Aruba 2530) : aucune
-     règle de sélection documentée -> signalé, jamais choisi en silence.
-  5. Token/procédure : "Mettre le Token approprié à la panne" reste un choix
-     humain (pas de table panne -> token disponible) -> non automatisé,
-     sauf le cas Switch/Baie/Serveur/Onduleur qui partage un Token unique
-     documenté (dossier complet "switch-baie-serveur-onduleur").
+     concerné, D = Numéro de série. À CONFIRMER.
+  2. Libellés de contrat Onduleur/Switch déduits par symétrie de nommage —
+     seul le libellé Switch est donné littéralement dans TOKI.
+  3. Le numéro de caisse n'a pas de champ dédié -> extrait par regex
+     best-effort depuis texte_mail.
+  4. Choix entre les 2 références Switch (Aruba 6000 vs Aruba 2530) :
+     aucune règle de sélection documentée -> signalé, jamais choisi en silence.
+  5. Token/procédure : reste un choix humain, sauf le cas Switch/Baie/
+     Serveur/Onduleur qui partage un Token unique documenté.
+
+--- Intégration Rule Engine (cette étape) ---
+  6. Ajout de 2 paramètres optionnels à `enrich_ticket` :
+     `rag_decision: RagDecision | None = None` et
+     `activer_rule_engine: bool = False`. Désactivé par défaut :
+     rétrocompatibilité totale.
+     ⚠️ BUT a DEUX points de sortie (`return ticket` anticipé quand aucun
+     matériel n'est détecté, et `return ticket` normal en fin de fonction)
+     -- le bloc Rule Engine est dupliqué dans les deux, sinon
+     `activer_rule_engine=True` n'aurait aucun effet pour les mails où le
+     matériel n'est pas reconnu.
 """
 
 import re
 import unicodedata
 
 from app.models.ticket import Ticket
+from app.models.rag_decision import RagDecision
+from app.services import rule_engine
 
 
 def _sans_accents(texte: str) -> str:
@@ -80,9 +85,22 @@ def _ajouter_si_absent(texte_existant: str, bloc: str) -> str:
     return bloc
 
 
-# --------------------------------------------------------------------------
-# Référentiel BUT (issu de TOKI_BUT.txt)
-# --------------------------------------------------------------------------
+def _formater_recommandations_rule_engine(recommandations) -> str:
+    """
+    Formate les RuleRecommendation (rule_engine.executer) en un bloc de
+    texte destiné à commentaire_interne -- ne modifie JAMAIS un champ
+    métier directement (même politique que sur les autres agents migrés).
+    """
+    if not recommandations:
+        return ""
+    lignes = ["🧩 Recommandations du Rule Engine (à vérifier, jamais appliquées automatiquement) :"]
+    for reco in recommandations:
+        lignes.append(
+            f"- Champ '{reco.field}' -> '{reco.value}' "
+            f"(confiance={reco.confidence:.2f}, source={reco.source}) : {reco.reason}"
+        )
+    return "\n".join(lignes)
+
 
 MATERIEL_CAISSE = "Caisse"
 MATERIEL_AFFICHEUR = "Afficheur Client"
@@ -94,7 +112,7 @@ FAMILLE_ENCAISSEMENT = (MATERIEL_CAISSE, MATERIEL_AFFICHEUR, MATERIEL_IMPRIMANTE
 FAMILLE_CALL = (MATERIEL_ONDULEUR, MATERIEL_SWITCH)
 
 CONTRAT_MCO = "CT.BUTINT17.001.1 - CONTRAT MCO"
-CONTRAT_CALL_ONDULEUR = "CT.BUTINT17.001.1 - CONTRAT AU CALL ONDULEUR"  # cf. hypothèse 2
+CONTRAT_CALL_ONDULEUR = "CT.BUTINT17.001.1 - CONTRAT AU CALL ONDULEUR"
 CONTRAT_CALL_SWITCH = "CT.BUTINT17.001.1 - CONTRAT AU CALL SWITCH"
 
 NIVEAU_SERVICE_ENCAISSEMENT = "GTR 1J (6/7)"
@@ -108,7 +126,6 @@ DUREE_PAR_MATERIEL = {
     MATERIEL_SWITCH: "60 min",
 }
 
-# Référence (code, désignation)
 REF_AFFICHEUR_SAGA = ("IBUTECR-ECRAN-8", "ECRAN 8\" + logo SAGA BUT")
 REF_AFFICHEUR_WINCOR = ("IBUTAFF-AFFICHE", "AFFICHEUR WINCOR")
 REF_IMPRIMANTE_JAC = ("IBUTIMP-TMH6-3U", "Epson TMH6000III-JAC MICR")
@@ -132,10 +149,6 @@ MOTS_CLES_MATERIEL = {
 RE_NUMERO_CAISSE = re.compile(r"caisse\s*n?[°o]?\s*(\d+)", re.IGNORECASE)
 
 
-# --------------------------------------------------------------------------
-# Helpers de détection
-# --------------------------------------------------------------------------
-
 def detecter_materiel(texte_mail: str) -> str:
     """Déduit le matériel concerné (Caisse/Afficheur/Imprimante/Onduleur/Switch)."""
     texte = _normaliser(texte_mail)
@@ -146,16 +159,13 @@ def detecter_materiel(texte_mail: str) -> str:
 
 
 def extraire_numero_caisse(texte_mail: str) -> str:
-    """Numéro de caisse (ex. 'Caisse N°1') -- filet de sécurité, cf. hypothèse 3."""
+    """Numéro de caisse (ex. 'Caisse N°1') -- filet de sécurité."""
     match = RE_NUMERO_CAISSE.search(texte_mail or "")
     return f"Caisse N°{match.group(1)}" if match else ""
 
 
 def choisir_reference_imprimante(texte_mail: str, numero_serie: str) -> tuple[str, str]:
-    """
-    JAC en préfixe du numéro de série -> modèle III-JAC MICR spécifiquement.
-    Sinon, le modèle explicitement demandé dans le mail (IV, V, ou TM T88V).
-    """
+    """JAC en préfixe du numéro de série -> modèle III-JAC MICR spécifiquement."""
     if (numero_serie or "").strip().upper().startswith("JAC"):
         return REF_IMPRIMANTE_JAC
     texte = _normaliser(texte_mail)
@@ -165,21 +175,18 @@ def choisir_reference_imprimante(texte_mail: str, numero_serie: str) -> tuple[st
         return REF_IMPRIMANTE_TMH6000V
     if "tmh6-4u" in texte or "h6000 iv" in texte or "tm-h6000 iv" in texte:
         return REF_IMPRIMANTE_TMH6_4U
-    return ("", "")  # aucun modèle déduit avec confiance -> à choisir manuellement
+    return ("", "")
 
 
 def choisir_reference_afficheur(texte_mail: str) -> tuple[str, str]:
-    """SAGA par défaut, sauf mention explicite de Wincor (cf. BUT.docx/TOKI)."""
+    """SAGA par défaut, sauf mention explicite de Wincor."""
     if "wincor" in _normaliser(texte_mail):
         return REF_AFFICHEUR_WINCOR
     return REF_AFFICHEUR_SAGA
 
 
 def choisir_reference_switch(texte_mail: str) -> tuple[str, str, str]:
-    """
-    Aucune règle de sélection documentée entre Aruba 6000 et Aruba 2530
-    (cf. hypothèse 4) -> retourne (code, designation, note_a_signaler).
-    """
+    """Aucune règle de sélection documentée entre Aruba 6000 et Aruba 2530."""
     texte = _normaliser(texte_mail)
     if "2530" in texte:
         return (*REF_SWITCH_ARUBA_2530, "")
@@ -192,12 +199,23 @@ def choisir_reference_switch(texte_mail: str) -> tuple[str, str, str]:
     )
 
 
-# --------------------------------------------------------------------------
-# Agent
-# --------------------------------------------------------------------------
+def enrich_ticket(
+    ticket: Ticket,
+    texte_mail: str = "",
+    rag_decision: RagDecision | None = None,
+    activer_rule_engine: bool = False,
+) -> Ticket:
+    """
+    Enrichit un Ticket déjà extrait du mail avec les règles métier BUT.
 
-def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
-    """Enrichit un Ticket déjà extrait du mail avec les règles métier BUT."""
+    `rag_decision` (optionnel) : une RagDecision déjà calculée en amont,
+    transmise telle quelle au Rule Engine si celui-ci est activé.
+
+    `activer_rule_engine` (par défaut False) : si True, exécute
+    rule_engine.executer(ticket, rag_decision) et ajoute ses
+    recommandations à commentaire_interne -- jamais à un champ métier.
+    Actif dans LES DEUX branches de sortie.
+    """
     notes: list[str] = []
 
     ticket.customer.client = "BUT"
@@ -219,6 +237,12 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
             ticket.intervention.commentaire_interne = _ajouter_si_absent(
                 ticket.intervention.commentaire_interne,
                 "⚠️ Points à vérifier (générés automatiquement) :\n" + "\n".join(f"- {n}" for n in notes),
+            )
+        if activer_rule_engine:
+            recommandations = rule_engine.executer(ticket, rag_decision)
+            bloc_recommandations = _formater_recommandations_rule_engine(recommandations)
+            ticket.intervention.commentaire_interne = _ajouter_si_absent(
+                ticket.intervention.commentaire_interne, bloc_recommandations
             )
         return ticket
 
@@ -314,6 +338,13 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
         bloc_notes = "⚠️ Points à vérifier (générés automatiquement) :\n" + "\n".join(f"- {n}" for n in notes)
         ticket.intervention.commentaire_interne = _ajouter_si_absent(
             ticket.intervention.commentaire_interne, bloc_notes
+        )
+
+    if activer_rule_engine:
+        recommandations = rule_engine.executer(ticket, rag_decision)
+        bloc_recommandations = _formater_recommandations_rule_engine(recommandations)
+        ticket.intervention.commentaire_interne = _ajouter_si_absent(
+            ticket.intervention.commentaire_interne, bloc_recommandations
         )
 
     return ticket
