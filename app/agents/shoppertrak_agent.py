@@ -36,22 +36,31 @@ Luxembourg (BeNeLux) + Danemark, Suède, Finlande, Norvège (Nordics).
 
 ⚠️ Hypothèses à vérifier :
   1. La liste de 8 pays est déduite de la capture d'écran ET du signataire
-     des mails (cohérents entre eux) -- mais la liste Pivot pourrait
-     comporter d'autres pays non visibles (scroll de la capture). À
-     confirmer.
-  2. L'Intitulé ("Enseigne Ville Code Site - <titre de la demande>") :
-     le "<titre>" n'a pas de champ dédié dans le mail -- j'utilise "Maintenance
-     caméra" par défaut quand le texte mentionne une caméra (cas des 3
-     exemples fournis), sinon je laisse cette partie vide et je signale.
-     Pas une règle générale validée pour tout type de demande ShopperTrak.
+     des mails -- mais la liste Pivot pourrait comporter d'autres pays non
+     visibles (scroll de la capture). À confirmer.
+  2. L'Intitulé : le "<titre>" n'a pas de champ dédié dans le mail --
+     j'utilise "Maintenance caméra" par défaut quand le texte mentionne
+     une caméra, sinon je laisse cette partie vide et je signale.
   3. Aucune règle pour Type/Sous-type/Matériel/Planification/Consignes et
      mission -- en attente des précisions de Sofiane.
+
+--- Intégration Rule Engine (cette étape) ---
+  4. Ajout de 2 paramètres optionnels à `enrich_ticket` :
+     `rag_decision: RagDecision | None = None` et
+     `activer_rule_engine: bool = False`. Désactivé par défaut :
+     rétrocompatibilité totale. SHOPPERTRAK n'a qu'UN SEUL point de
+     sortie : le bloc Rule Engine n'est ajouté qu'une fois, en fin de
+     fonction. Cette intégration est indépendante de l'incomplétude
+     métier de l'agent (elle ne comble aucun des champs manquants
+     mentionnés ci-dessus, elle ajoute uniquement des recommandations).
 """
 
 import re
 import unicodedata
 
 from app.models.ticket import Ticket
+from app.models.rag_decision import RagDecision
+from app.services import rule_engine
 
 
 def _sans_accents(texte: str) -> str:
@@ -80,9 +89,22 @@ def _ajouter_si_absent(texte_existant: str, bloc: str) -> str:
     return bloc
 
 
-# --------------------------------------------------------------------------
-# Référentiel SHOPPERTRAK
-# --------------------------------------------------------------------------
+def _formater_recommandations_rule_engine(recommandations) -> str:
+    """
+    Formate les RuleRecommendation (rule_engine.executer) en un bloc de
+    texte destiné à commentaire_interne -- ne modifie JAMAIS un champ
+    métier directement (même politique que sur les autres agents migrés).
+    """
+    if not recommandations:
+        return ""
+    lignes = ["🧩 Recommandations du Rule Engine (à vérifier, jamais appliquées automatiquement) :"]
+    for reco in recommandations:
+        lignes.append(
+            f"- Champ '{reco.field}' -> '{reco.value}' "
+            f"(confiance={reco.confidence:.2f}, source={reco.source}) : {reco.reason}"
+        )
+    return "\n".join(lignes)
+
 
 PAYS_VERS_CONTRAT = {
     "france": "OD.SHOPPE25.001.1 - ON DEMAND FRANCE (ON DEMAND)",
@@ -95,7 +117,6 @@ PAYS_VERS_CONTRAT = {
     "norvege": "OD.SHOPPE25.001.1 - ON DEMAND NORVEGE (ON DEMAND)",
 }
 
-# Ordre fixe des champs positionnels (cf. docstring) : (clé, libellés possibles à retirer si présents)
 CHAMPS_ORDRE = [
     ("enseigne", ("enseigne", "enseuigne")),
     ("code_site", ("code site",)),
@@ -110,12 +131,7 @@ RE_ANCRE_INTER_RETAIL = re.compile(r"^\s*I?NTER\s*\n\s*RETAIL\s*\n", re.IGNORECA
 
 
 def nettoyer_valeur_champ(ligne: str, motifs_labels: tuple) -> str:
-    """
-    Retire un préfixe de label optionnel (ex: 'Pays : FRANCE' -> 'FRANCE').
-    N'agit que si le label est suivi d'un vrai séparateur (':' ou espace) --
-    sinon 'PAYS-BAS' serait amputé en '-BAS' (le label 'pays' matchant le
-    début du nom du pays lui-même).
-    """
+    """Retire un préfixe de label optionnel (ex: 'Pays : FRANCE' -> 'FRANCE')."""
     ligne = (ligne or "").strip()
     for motif in motifs_labels:
         pattern = re.compile(rf"^{motif}(?:\s*:\s*|\s+)", re.IGNORECASE)
@@ -126,10 +142,7 @@ def nettoyer_valeur_champ(ligne: str, motifs_labels: tuple) -> str:
 
 
 def extraire_champs_shoppertrak(texte: str) -> dict:
-    """
-    Extrait les 7 champs positionnels + la Problématique et demande
-    (cf. docstring du module pour le format).
-    """
+    """Extrait les 7 champs positionnels + la Problématique et demande."""
     if not texte:
         return {}
 
@@ -156,26 +169,29 @@ def extraire_champs_shoppertrak(texte: str) -> dict:
 
 
 def construire_intitule(enseigne: str, ville: str, code_site: str, problematique: str) -> tuple[str, bool]:
-    """
-    "Enseigne Ville Code Site - <titre de la demande>" (cf. Sofiane).
-    Retourne (intitule, titre_devine) -- titre_devine=False si on n'a pas
-    pu déterminer le titre depuis la problématique (cf. hypothèse 2).
-    """
+    """"Enseigne Ville Code Site - <titre de la demande>"."""
     base = " ".join(p for p in (enseigne, ville, code_site) if p)
     if "camera" in _normaliser(problematique) or "caméra" in problematique.lower():
         return f"{base} - Maintenance caméra", True
     return base, False
 
 
-# --------------------------------------------------------------------------
-# Agent
-# --------------------------------------------------------------------------
-
-def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
+def enrich_ticket(
+    ticket: Ticket,
+    texte_mail: str = "",
+    rag_decision: RagDecision | None = None,
+    activer_rule_engine: bool = False,
+) -> Ticket:
     """
-    Enrichit un Ticket avec les règles SHOPPERTRAK connues à ce jour
-    (Site d'intervention, Contrat par pays, Intitulé). Volontairement
-    incomplet -- cf. avertissement du docstring du module.
+    Enrichit un Ticket avec les règles SHOPPERTRAK connues à ce jour.
+    Volontairement incomplet.
+
+    `rag_decision` (optionnel) : une RagDecision déjà calculée en amont,
+    transmise telle quelle au Rule Engine si celui-ci est activé.
+
+    `activer_rule_engine` (par défaut False) : si True, exécute
+    rule_engine.executer(ticket, rag_decision) et ajoute ses
+    recommandations à commentaire_interne -- jamais à un champ métier.
     """
     notes: list[str] = []
 
@@ -226,6 +242,13 @@ def enrich_ticket(ticket: Ticket, texte_mail: str = "") -> Ticket:
         bloc_notes = "⚠️ Points à vérifier (générés automatiquement) :\n" + "\n".join(f"- {n}" for n in notes)
         ticket.intervention.commentaire_interne = _ajouter_si_absent(
             ticket.intervention.commentaire_interne, bloc_notes
+        )
+
+    if activer_rule_engine:
+        recommandations = rule_engine.executer(ticket, rag_decision)
+        bloc_recommandations = _formater_recommandations_rule_engine(recommandations)
+        ticket.intervention.commentaire_interne = _ajouter_si_absent(
+            ticket.intervention.commentaire_interne, bloc_recommandations
         )
 
     return ticket
