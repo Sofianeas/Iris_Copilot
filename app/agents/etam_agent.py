@@ -17,28 +17,29 @@ Couverture de cette version :
   Transporteur) : entièrement implémentée et testée contre l'exemple
   fourni (ETAM Lingerie 0351, Samsung A54 demandé -> A52 imposé).
 - Branches TPE ETAM / IMAC / Slovaquie & RT : détection de branche
-  implémentée, mais SEULES les règles communes sont appliquées (pas
-  d'exemple réel disponible pour ces 3 branches à ce jour) -> toujours
-  signalé, jamais fabriqué.
+  implémentée, mais SEULES les règles communes sont appliquées.
 
 Règles clés de la branche Mobilité/Smartphone :
-- Type = "Swap Transporteur" (TOKI : "Intégration + envoi avec swap
-  transporteur" pour les smartphones Samsung) -> pas d'intervention sur site.
+- Type = "Swap Transporteur" -> pas d'intervention sur site.
 - ⚠️ RÈGLE CRITIQUE (TOKI_ETAM.txt, "Consigne client") : prioriser
-  SYSTÉMATIQUEMENT l'A52 sur chaque ticket de maintenance, MÊME SI Akkodis
-  demande explicitement un A54 ou un A56. Cet agent applique cette priorité
-  et le signale -- ne JAMAIS relayer tel quel le modèle demandé dans le
-  formulaire sans appliquer cette règle.
+  SYSTÉMATIQUEMENT l'A52, MÊME SI Akkodis demande explicitement un A54/A56.
 - "Panne" -> transporteur AFFRETEMENT SANS + référence LOG-SWAP-UPS.
   "Perte/Vol" -> transporteur CLIENT SANS, PAS de LOG-SWAP-UPS.
 - Code client ETAM vs INVEST21 : INVEST21 si l'enseigne n'est PAS "Etam"
-  elle-même (ex. Undiz, Maison 123 sous le même groupe) -- ne pas confondre
-  ETAM et ERAM (clients différents).
-- Technicien anglophone déduit du champ "Langue" du formulaire (donnée
-  fournie directement, plus fiable qu'une déduction depuis le pays).
+  elle-même.
+- Technicien anglophone déduit du champ "Langue" du formulaire.
 - "Noter le nom du matériel dans le champ TAG de FootPrints" (TOKI) :
-  IGNORÉ -- FootPrints est l'ancien logiciel, non utilisé (confirmé par
-  Sofiane), cette instruction ne s'applique plus.
+  IGNORÉ -- FootPrints est l'ancien logiciel, non utilisé.
+
+--- Intégration Rule Engine (cette étape) ---
+  Ajout de 2 paramètres optionnels à `enrich_ticket_depuis_fichier`, en FIN
+  de signature (après `texte_mail`) : `rag_decision: RagDecision | None =
+  None` et `activer_rule_engine: bool = False`. Désactivé par défaut :
+  rétrocompatibilité totale. ETAM n'a qu'UN SEUL point de sortie.
+  ⚠️ Le contrat n'est JAMAIS vide sur cet agent (MOBILITE ->
+  "Maintenance Mobilité", autres branches -> nom de la branche elle-même)
+  -> `client_rule` (qui ne recommande que si contrat vide) ne se
+  déclenchera jamais ici -- comportement attendu, testé explicitement.
 """
 
 import re
@@ -47,6 +48,8 @@ import unicodedata
 from openpyxl import load_workbook
 
 from app.models.ticket import Ticket
+from app.models.rag_decision import RagDecision
+from app.services import rule_engine
 
 
 def _sans_accents(texte: str) -> str:
@@ -75,10 +78,22 @@ def _ajouter_si_absent(texte_existant: str, bloc: str) -> str:
     return bloc
 
 
-# --------------------------------------------------------------------------
-# Lecture du fichier ETAM (structure déduite d'une capture d'écran, cf.
-# avertissement du docstring)
-# --------------------------------------------------------------------------
+def _formater_recommandations_rule_engine(recommandations) -> str:
+    """
+    Formate les RuleRecommendation (rule_engine.executer) en un bloc de
+    texte destiné à commentaire_interne -- ne modifie JAMAIS un champ
+    métier directement (même politique que sur les autres agents migrés).
+    """
+    if not recommandations:
+        return ""
+    lignes = ["🧩 Recommandations du Rule Engine (à vérifier, jamais appliquées automatiquement) :"]
+    for reco in recommandations:
+        lignes.append(
+            f"- Champ '{reco.field}' -> '{reco.value}' "
+            f"(confiance={reco.confidence:.2f}, source={reco.source}) : {reco.reason}"
+        )
+    return "\n".join(lignes)
+
 
 SECTIONS_CONNUES = {
     "information sur l'enseigne": "enseigne",
@@ -98,7 +113,7 @@ def detecter_section(label_normalise: str) -> str:
 
 
 def construire_cle(section: str, label_normalise: str) -> str:
-    """Mappe (section_courante, label) -> clé interne. 'materiel (modele)' est ambigu (2 occurrences) -> dépend de la section."""
+    """Mappe (section_courante, label) -> clé interne."""
     if label_normalise.startswith("code magasin"):
         return "code_magasin"
     if label_normalise.startswith("adresse de livraison"):
@@ -133,12 +148,7 @@ def construire_cle(section: str, label_normalise: str) -> str:
 
 
 def lire_champs_etam(fichier, feuille: str | None = None) -> dict:
-    """
-    Lit le fichier ETAM. Hypothèse de colonnes (NON VÉRIFIÉE contre un vrai
-    fichier, cf. avertissement du docstring) : A=Label, B=Valeur, C=Valeur
-    secondaire UNIQUEMENT pour "Matériel (Modèle) à préparer" (qui porte à
-    la fois une description humaine en B et les références Pivot en C).
-    """
+    """Lit le fichier ETAM. Hypothèse de colonnes (NON VÉRIFIÉE contre un vrai fichier)."""
     wb = load_workbook(fichier, data_only=True)
     ws = wb[feuille] if feuille else wb.active
 
@@ -172,10 +182,6 @@ def lire_champs_etam(fichier, feuille: str | None = None) -> dict:
     return resultat
 
 
-# --------------------------------------------------------------------------
-# Parsing du bloc adresse (multi-lignes, cf. exemple ETAM Lingerie)
-# --------------------------------------------------------------------------
-
 RE_ENSEIGNE_CODE = re.compile(r"^(.+?)\s*\(n°?\s*(\d+)\)", re.IGNORECASE)
 RE_CP_VILLE = re.compile(r"^(\d{4,5})\s+(.+)$")
 RE_TEL = re.compile(r"t[ée]l\s*:?\s*(.+)", re.IGNORECASE)
@@ -190,15 +196,7 @@ def normaliser_telephone_fr_intl(numero: str) -> str:
 
 
 def parser_bloc_adresse_etam(bloc: str) -> dict:
-    """
-    Parse le bloc multi-lignes "Adresse de livraison et d'enlèvement" :
-      "<Enseigne> (n° <code>)
-       [<complément, ex. nom du centre commercial>]
-       <rue>
-       <CP> <Ville>
-       <PAYS>
-       Tél : <numéro>"
-    """
+    """Parse le bloc multi-lignes "Adresse de livraison et d'enlèvement"."""
     resultat = {
         "enseigne": "", "code_magasin": "", "complement_adresse": "",
         "adresse": "", "code_postal": "", "ville": "", "pays": "", "telephone_site": "",
@@ -237,10 +235,6 @@ def parser_bloc_adresse_etam(bloc: str) -> dict:
     return resultat
 
 
-# --------------------------------------------------------------------------
-# Référentiel ETAM (issu de TOKI_ETAM.txt)
-# --------------------------------------------------------------------------
-
 BUNDLE_A52 = (
     "CETAMOB-SAMSUNG-A52-5G",
     "SMARTPHONE SAMSUNG A52-5G – ETAM – SPARE (inclut téléphone, verre trempé, coque, tour de cou)",
@@ -269,14 +263,14 @@ def determiner_transporteur_et_swap(typologie_panne: str) -> tuple[str, bool, st
 
 
 def determiner_code_client(enseigne: str) -> tuple[str, bool]:
-    """ETAM.docx : INVEST21 si l'enseigne n'est pas Etam elle-même (ex. Undiz, Maison 123)."""
+    """ETAM.docx : INVEST21 si l'enseigne n'est pas Etam elle-même."""
     if "etam" in _normaliser(enseigne):
         return "ETAM", True
     return "INVEST21", False
 
 
 def technicien_anglophone_depuis_langue(langue: str) -> tuple[bool, bool]:
-    """Retourne (technicien_anglophone, langue_reconnue) -- depuis le champ Langue du formulaire."""
+    """Retourne (technicien_anglophone, langue_reconnue)."""
     langue_n = _normaliser(langue)
     if not langue_n:
         return False, False
@@ -286,11 +280,7 @@ def technicien_anglophone_depuis_langue(langue: str) -> tuple[bool, bool]:
 
 
 def detecter_branche(materiel_panne: str, materiel_preparer: str) -> tuple[str, bool]:
-    """
-    Déduit la branche ETAM (TPE / MOBILITE / IMAC / SLOVAQUIE_RT).
-    Retourne (branche, confiant) -- confiant=False si c'est un repli par
-    défaut plutôt qu'une détection explicite par mot-clé.
-    """
+    """Déduit la branche ETAM (TPE / MOBILITE / IMAC / SLOVAQUIE_RT)."""
     texte = _normaliser(f"{materiel_panne} {materiel_preparer}")
     if any(mot in texte for mot in ("p400", "v400m", "adyen", "terminal de paiement", " tpe ", "tpe ")):
         return "TPE", True
@@ -301,25 +291,30 @@ def detecter_branche(materiel_panne: str, materiel_preparer: str) -> tuple[str, 
         return "MOBILITE", True
     if any(mot in texte for mot in ("fermeture", "ouverture", "ajout materiel", "ramassage materiel", "transfert boutique")):
         return "IMAC", True
-    return "MOBILITE", False  # branche la plus fréquemment observée à ce jour, à confirmer si erroné
+    return "MOBILITE", False
 
 
-# --------------------------------------------------------------------------
-# Agent
-# --------------------------------------------------------------------------
-
-def enrich_ticket_depuis_fichier(ticket: Ticket, fichier_etam, texte_mail: str = "") -> Ticket:
+def enrich_ticket_depuis_fichier(
+    ticket: Ticket,
+    fichier_etam,
+    texte_mail: str = "",
+    rag_decision: RagDecision | None = None,
+    activer_rule_engine: bool = False,
+) -> Ticket:
     """
-    Enrichit un Ticket à partir du fichier ETAM (xlsx -- structure déduite
-    d'une capture d'écran, cf. avertissement du docstring du module) et, en
-    complément, du texte du mail s'il porte les mêmes informations (Sofiane :
-    "ils envoient ça comme fichier mais parfois directement dans le mail").
+    Enrichit un Ticket à partir du fichier ETAM.
+
+    `rag_decision` (optionnel) : une RagDecision déjà calculée en amont,
+    transmise telle quelle au Rule Engine si celui-ci est activé.
+
+    `activer_rule_engine` (par défaut False) : si True, exécute
+    rule_engine.executer(ticket, rag_decision) et ajoute ses
+    recommandations à commentaire_interne -- jamais à un champ métier.
     """
     notes: list[str] = []
 
     champs = lire_champs_etam(fichier_etam)
 
-    # --- Bloc adresse ---
     bloc_adresse = parser_bloc_adresse_etam(champs.get("adresse_livraison", ""))
 
     code_magasin = champs.get("code_magasin") or bloc_adresse["code_magasin"]
@@ -361,7 +356,6 @@ def enrich_ticket_depuis_fichier(ticket: Ticket, fichier_etam, texte_mail: str =
         notes.append("Nom du contact sur site introuvable — à compléter manuellement.")
     ticket.customer.email = champs.get("email_site", "")
 
-    # --- Branche ETAM ---
     branche, branche_confiante = detecter_branche(champs.get("materiel_panne", ""), champs.get("materiel_preparer", ""))
     notes.append(
         f"⚠️ BRANCHE déduite : « {branche} »"
@@ -394,7 +388,7 @@ def enrich_ticket_depuis_fichier(ticket: Ticket, fichier_etam, texte_mail: str =
 
         ticket.intervention.contrat = "Maintenance Mobilité"
         ticket.intervention.type = "Swap Transporteur"
-        ticket.procedure.intervention_sur_site = False  # "Swap Transporteur pas d'intervention sur Site" (docx)
+        ticket.procedure.intervention_sur_site = False
 
         if modele_demande in ("A54", "A56"):
             ticket.intervention.sous_type = "Smartphone"
@@ -411,8 +405,7 @@ def enrich_ticket_depuis_fichier(ticket: Ticket, fichier_etam, texte_mail: str =
         else:
             notes.append(
                 "Matériel mobilité non reconnu comme un smartphone Samsung "
-                "(A52/A54/A56) — Type/Sous-type et pièce à compléter manuellement "
-                "(douchette/iPad/imprimante non couverts par cette version de l'agent)."
+                "(A52/A54/A56) — Type/Sous-type et pièce à compléter manuellement."
             )
 
         ticket.logistics.besoin_materiel = True
@@ -430,8 +423,7 @@ def enrich_ticket_depuis_fichier(ticket: Ticket, fichier_etam, texte_mail: str =
         )
         notes.append(
             "Intitulé construit sans règle stricte documentée pour la branche "
-            "Mobilité (ETAM.docx ne donne pas de patron d'Intitulé pour cette "
-            "branche, contrairement à TPE/IMAC) — format best-effort, à ajuster si besoin."
+            "Mobilité — format best-effort, à ajuster si besoin."
         )
 
     else:
@@ -439,9 +431,7 @@ def enrich_ticket_depuis_fichier(ticket: Ticket, fichier_etam, texte_mail: str =
             f"Branche '{branche}' détectée mais NON ENCORE IMPLÉMENTÉE en détail "
             f"dans cet agent (seule la branche Mobilité/Smartphone a été testée "
             f"contre un exemple réel à ce jour) — seules les règles communes "
-            f"(client, contrat='{branche}', origine) ont été appliquées, le reste "
-            f"vient de l'extraction brute. Fournir un exemple réel de cette "
-            f"branche pour la durcir."
+            f"ont été appliquées. Fournir un exemple réel de cette branche pour la durcir."
         )
         ticket.intervention.contrat = branche
 
@@ -449,6 +439,13 @@ def enrich_ticket_depuis_fichier(ticket: Ticket, fichier_etam, texte_mail: str =
         bloc_notes = "⚠️ Points à vérifier (générés automatiquement) :\n" + "\n".join(f"- {n}" for n in notes)
         ticket.intervention.commentaire_interne = _ajouter_si_absent(
             ticket.intervention.commentaire_interne, bloc_notes
+        )
+
+    if activer_rule_engine:
+        recommandations = rule_engine.executer(ticket, rag_decision)
+        bloc_recommandations = _formater_recommandations_rule_engine(recommandations)
+        ticket.intervention.commentaire_interne = _ajouter_si_absent(
+            ticket.intervention.commentaire_interne, bloc_recommandations
         )
 
     return ticket
