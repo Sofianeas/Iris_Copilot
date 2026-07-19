@@ -35,20 +35,24 @@ Structure réelle observée (fichier "Matrice Inter IRIS" fourni en exemple) :
   1. Le contrat unique AXE E-SANTE n'a pas de libellé Pivot documenté
      (comme pour AEMSOFT) -> CONTRAT_AXE_ESANTE est laissé vide, à compléter.
   2. "Besoin de matériel (oui/non)" est en pratique du texte libre, pas un
-     vrai booléen -> interprété par heuristique (cf. `interpreter_besoin_materiel`),
-     TOUJOURS signalé en commentaire, jamais appliqué en silence.
+     vrai booléen -> interprété par heuristique, TOUJOURS signalé en
+     commentaire, jamais appliqué en silence.
   3. "Contact" / "Téléphone" (labels isolés) = coordonnées d'AXE E-Santé,
-     pas du contact site -> non mappés sur customer.*. Si ce n'est pas le
-     comportement souhaité, à corriger.
+     pas du contact site -> non mappés sur customer.*.
   4. "Type de demande" ne contient pas toujours littéralement "Installation"
-     ou "Remplacement" (ex. observé : "Intervention sur borne type B v1")
-     -> `detecter_type_demande` croise avec "Description complète" en
-     repli, mais reste une déduction à vérifier si le résultat est vide.
+     ou "Remplacement" -> `detecter_type_demande` croise avec "Description
+     complète" en repli.
   5. "Retour de pièces" est déduit du champ "accessoires à récupérer" par
-     heuristique (cf. `interpreter_retour_piece`), même logique de
-     signalement systématique que le point 2.
-  6. Pas de champ "Code Site" pour AXE E-SANTE (absent de AXE_E-SANTE.docx,
-     absent du fichier réel) -> non géré, à la différence d'AEMSOFT/AMPLIFON.
+     heuristique.
+  6. Pas de champ "Code Site" pour AXE E-SANTE.
+
+--- Intégration Rule Engine (cette étape) ---
+  7. Ajout de 2 paramètres optionnels à `enrich_ticket_depuis_excel`, en
+     FIN de signature (après `texte_mail`, pour préserver la compatibilité
+     positionnelle des appels existants) : `rag_decision: RagDecision |
+     None = None` et `activer_rule_engine: bool = False`. Désactivé par
+     défaut : rétrocompatibilité totale. AXE E-SANTE n'a qu'UN SEUL point
+     de sortie.
 """
 
 import re
@@ -57,6 +61,8 @@ import unicodedata
 from openpyxl import load_workbook
 
 from app.models.ticket import Ticket
+from app.models.rag_decision import RagDecision
+from app.services import rule_engine
 
 
 def _sans_accents(texte: str) -> str:
@@ -85,16 +91,26 @@ def _ajouter_si_absent(texte_existant: str, bloc: str) -> str:
     return bloc
 
 
-# --------------------------------------------------------------------------
-# Référentiel AXE E-SANTE (issu de AXE_E-SANTE.docx)
-# --------------------------------------------------------------------------
+def _formater_recommandations_rule_engine(recommandations) -> str:
+    """
+    Formate les RuleRecommendation (rule_engine.executer) en un bloc de
+    texte destiné à commentaire_interne -- ne modifie JAMAIS un champ
+    métier directement (même politique que sur les autres agents migrés).
+    """
+    if not recommandations:
+        return ""
+    lignes = ["🧩 Recommandations du Rule Engine (à vérifier, jamais appliquées automatiquement) :"]
+    for reco in recommandations:
+        lignes.append(
+            f"- Champ '{reco.field}' -> '{reco.value}' "
+            f"(confiance={reco.confidence:.2f}, source={reco.source}) : {reco.reason}"
+        )
+    return "\n".join(lignes)
+
 
 NUMERO_CLIENT_AXE_ESANTE = "DIFFME21"
 CONTRAT_AXE_ESANTE = ""  # TODO : libellé Pivot non documenté, cf. hypothèse 1
 
-# (clé interne -> (motif normalisé, mode 'startswith' ou 'exact'))
-# Les clés préfixées "_" sont reconnues (pour ne pas casser le scan
-# séquentiel) mais volontairement NON mappées sur un champ du Ticket.
 LABELS_A_MAPPER = {
     "intitule": ("intitule de la demande", "startswith"),
     "type_demande": ("type de demande", "startswith"),
@@ -119,23 +135,10 @@ RE_CONTACT_SITE = re.compile(r"contact sur site pour intervention\s*:\s*(.+)", r
 RE_RUE_CP_VILLE = re.compile(r"(.+?),\s*(\d{5})\s+(.+)")
 
 
-# --------------------------------------------------------------------------
-# Lecture du xlsx (déterministe, par correspondance de libellé)
-# --------------------------------------------------------------------------
-
 def lire_champs_excel(fichier, feuille: str | None = None) -> dict:
     """
     Lit le xlsx AXE E-SANTE (formulaire vertical colonne B, label puis
-    valeur en alternance -- avec quelques lignes de bruit comme le titre
-    de section "Site d'intervention" qui n'ont pas de valeur propre).
-
-    `fichier` peut être un chemin (str) ou un objet fichier (ex. upload
-    Streamlit) : openpyxl accepte les deux.
-
-    Lecture séquentielle robuste : chaque cellule non vide est comparée
-    aux libellés connus (LABELS_A_MAPPER) ; si elle correspond, la cellule
-    suivante est consommée comme valeur. Sinon, la cellule est ignorée
-    (bruit / titre de section) sans consommer de valeur.
+    valeur en alternance -- avec quelques lignes de bruit).
     """
     wb = load_workbook(fichier, data_only=True)
     ws = wb[feuille] if feuille else wb.active
@@ -168,12 +171,7 @@ def lire_champs_excel(fichier, feuille: str | None = None) -> dict:
 
 
 def parser_bloc_adresse(bloc: str) -> dict:
-    """
-    Parse le bloc "Adresse" (texte libre multi-lignes) :
-      "Nom du site : <enseigne>
-       <rue>, <CP> <Ville>
-       Contact sur site pour intervention : <contact>"
-    """
+    """Parse le bloc "Adresse" (texte libre multi-lignes)."""
     resultat = {"enseigne": "", "adresse": "", "code_postal": "", "ville": "", "contact_site": ""}
     if not bloc:
         return resultat
@@ -194,15 +192,8 @@ def parser_bloc_adresse(bloc: str) -> dict:
     return resultat
 
 
-# --------------------------------------------------------------------------
-# Helpers de déduction / construction
-# --------------------------------------------------------------------------
-
 def detecter_type_demande(type_brut: str, description: str) -> str:
-    """
-    Installation / Remplacement (cf. hypothèse 4 : "Type de demande" ne
-    contient pas toujours littéralement l'un de ces deux mots).
-    """
+    """Installation / Remplacement."""
     texte = _normaliser(f"{type_brut or ''} {description or ''}")
     if "sans integration" in texte:
         return "Installation"
@@ -214,7 +205,7 @@ def detecter_type_demande(type_brut: str, description: str) -> str:
 
 
 def extraire_duree_et_techniciens(valeur: str) -> tuple[str, int]:
-    """Parse '1h 1tech' -> ('1h', 1). Champ unique pour les 2 infos (cf. docx)."""
+    """Parse '1h 1tech' -> ('1h', 1)."""
     duree, nb_tech = "", 0
     if not valeur:
         return duree, nb_tech
@@ -228,11 +219,7 @@ def extraire_duree_et_techniciens(valeur: str) -> tuple[str, int]:
 
 
 def interpreter_besoin_materiel(valeur: str) -> tuple[bool, str]:
-    """
-    Le label demande oui/non mais la valeur réelle est souvent une phrase
-    libre (ex. "disponible chez le client"). Retourne (besoin_materiel,
-    note_explicative) -- la note est TOUJOURS renvoyée pour traçabilité.
-    """
+    """Le label demande oui/non mais la valeur réelle est souvent une phrase libre."""
     texte = _normaliser(valeur)
     if not texte:
         return False, "Besoin de matériel non renseigné dans le xlsx — laissé à Non par défaut, à vérifier."
@@ -247,7 +234,7 @@ def interpreter_besoin_materiel(valeur: str) -> tuple[bool, str]:
 
 
 def interpreter_retour_piece(valeur: str) -> tuple[str, str]:
-    """Retour de pièces déduit du texte libre 'accessoires à récupérer' (cf. hypothèse 5)."""
+    """Retour de pièces déduit du texte libre 'accessoires à récupérer'."""
     texte = _normaliser(valeur)
     if not texte:
         return "", ""
@@ -259,7 +246,7 @@ def interpreter_retour_piece(valeur: str) -> tuple[str, str]:
 
 
 def construire_intitule(type_demande: str, intitule_brut: str) -> str:
-    """Intitulé = '<Type> – <Intitulé de la demande>' (ex. AXE E-SANTE.docx)."""
+    """Intitulé = '<Type> – <Intitulé de la demande>'."""
     intitule_brut = (intitule_brut or "").strip()
     if not type_demande or not intitule_brut:
         return intitule_brut
@@ -267,11 +254,7 @@ def construire_intitule(type_demande: str, intitule_brut: str) -> str:
 
 
 def construire_travail_attendu(champs: dict) -> str:
-    """
-    Travail attendu = Description + Besoin de matériel (texte brut) +
-    Accessoires à récupérer + Commentaire + Documents à joindre, chacun
-    étiqueté pour traçabilité (cf. AXE E-SANTE.docx).
-    """
+    """Travail attendu = Description + Besoin de matériel + Accessoires + Commentaire + Documents."""
     parties = []
     if champs.get("description"):
         parties.append(champs["description"])
@@ -286,20 +269,26 @@ def construire_travail_attendu(champs: dict) -> str:
     return "\n\n".join(parties)
 
 
-# --------------------------------------------------------------------------
-# Agent
-# --------------------------------------------------------------------------
-
-def enrich_ticket_depuis_excel(ticket: Ticket, fichier_excel, texte_mail: str = "") -> Ticket:
+def enrich_ticket_depuis_excel(
+    ticket: Ticket,
+    fichier_excel,
+    texte_mail: str = "",
+    rag_decision: RagDecision | None = None,
+    activer_rule_engine: bool = False,
+) -> Ticket:
     """
     Enrichit un Ticket à partir du xlsx AXE E-SANTE (source principale) et,
-    en complément, du texte du mail (texte_mail) qui peut porter des
-    informations additionnelles (cf. note de Sofiane : toujours croiser
-    mail + xlsx).
+    en complément, du texte du mail.
 
-    `fichier_excel` : chemin ou objet fichier du "demande.xlsx".
-    Ne PAS passer le PDF "fiche d'intervention" ici : il n'a pas besoin
-    d'être lu, il part tel quel en pièce jointe du ticket Pivot (Documents).
+    `fichier_excel` : chemin ou objet fichier du "demande.xlsx". Ne PAS
+    passer le PDF "fiche d'intervention" ici.
+
+    `rag_decision` (optionnel) : une RagDecision déjà calculée en amont,
+    transmise telle quelle au Rule Engine si celui-ci est activé.
+
+    `activer_rule_engine` (par défaut False) : si True, exécute
+    rule_engine.executer(ticket, rag_decision) et ajoute ses
+    recommandations à commentaire_interne -- jamais à un champ métier.
     """
     notes: list[str] = []
 
@@ -389,23 +378,26 @@ def enrich_ticket_depuis_excel(ticket: Ticket, fichier_excel, texte_mail: str = 
         ticket.procedure.autre_outillage = champs["outillage"]
 
     ticket.procedure.intervention_sur_site = True
-    ticket.procedure.technicien_anglophone = False  # AXE E-SANTE = France uniquement
+    ticket.procedure.technicien_anglophone = False
     ticket.procedure.procedure = True
 
-    # --- Mail complémentaire : ajouté tel quel en note si présent ---
     if texte_mail and texte_mail.strip():
         notes.append(
             "Le mail contenait du texte en plus du xlsx — à relire pour d'éventuelles "
             "informations complémentaires (non extraites automatiquement par cet agent)."
         )
 
-    # --- PDF "fiche d'intervention" : à rattacher tel quel, jamais lu ---
-    # --- Pièces jointes (xlsx + PDF) : pas de champ Documents dans Ticket ---
-
     if notes:
         bloc_notes = "⚠️ Points à vérifier (générés automatiquement) :\n" + "\n".join(f"- {n}" for n in notes)
         ticket.intervention.commentaire_interne = _ajouter_si_absent(
             ticket.intervention.commentaire_interne, bloc_notes
+        )
+
+    if activer_rule_engine:
+        recommandations = rule_engine.executer(ticket, rag_decision)
+        bloc_recommandations = _formater_recommandations_rule_engine(recommandations)
+        ticket.intervention.commentaire_interne = _ajouter_si_absent(
+            ticket.intervention.commentaire_interne, bloc_recommandations
         )
 
     return ticket
