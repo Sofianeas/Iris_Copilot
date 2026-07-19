@@ -8,51 +8,45 @@ d'écran), je n'ai ici qu'une RETRANSCRIPTION TEXTE d'un exemple -- pas de
 fichier réel. Sofiane précise aussi que les informations sont parfois dans
 le mail, parfois dans la pièce jointe Excel, parfois les deux -> plutôt que
 de deviner une mise en page de cellules (fragile), cet agent travaille sur
-du TEXTE BRUT par extraction regex, indépendamment de la source exacte
-(mail, Excel aplati en texte, ou les deux concaténés). C'est un choix
-architectural différent d'AXE E-SANTE/ETAM, justifié par cette variabilité
-de source plutôt que par une mise en page de cellules fixe.
+du TEXTE BRUT par extraction regex, indépendamment de la source exacte.
 
 Règles clés (DYNAMIZ_PHARMA.docx) :
 - Pays = toujours France. Technicien anglophone = toujours Non.
 - ⚠️ Procédure = NON par défaut chez ce client -- c'est le SEUL client de
-  toute la base où c'est le cas (tous les autres ont Oui). Erreur courante
-  à éviter, cf. SKILL.md "erreurs courantes".
-- Code Site = le "code client" du bloc "Client à facturer" (PAS le champ
-  "Code site" séparé sous "Site d'intervention", souvent vide).
+  toute la base où c'est le cas.
+- Code Site = le "code client" du bloc "Client à facturer".
 - "Description de la demande" se décompose en 2 sous-sections : "Contexte:"
-  -> Problématique, "Intervention à réaliser:" (+ tout ce qui suit) ->
-  Travail attendu.
-- Type : INSTALLATION / MAINTENANCE SAV / PREVISITE (champ "Intitulé de la
-  demande" du formulaire, valeurs SAV/INSTALLATION/PREVISITE).
-- Type de ticket : Incident si SAV (Maintenance), Demande si
-  INSTALLATION/PREVISITE.
-- "Hauteur de l'intervention" -> Autre outillage spécifique. Si le texte
-  mentionne la nécessité de confirmer qu'un câble réseau est bien actif/
-  connecté -> ajouter "Testeur de câbles" (sans inclure le matériel déjà
-  envoyé).
+  -> Problématique, "Intervention à réaliser:" -> Travail attendu.
+- Type : INSTALLATION / MAINTENANCE SAV / PREVISITE.
+- "Hauteur de l'intervention" -> Autre outillage spécifique.
 - "Date et heure intervention souhaitée" : si ce n'est pas une vraie date/
-  heure mais une consigne de prise de contact (cas fréquent, cf. exemple
-  fourni), ce n'est PAS une Date limite -> classé en Consigne de
-  planification à la place.
+  heure, classé en Consigne de planification.
 
 ⚠️ Hypothèses à vérifier :
-  1. Mise en page exacte non vérifiée (cf. avertissement ci-dessus) --
-     l'extraction repose sur la présence des libellés exacts observés dans
-     l'exemple fourni, pas sur une structure de cellules confirmée.
-  2. Contrat unique non documenté (même situation qu'AEMSOFT/AXE E-SANTE)
-     -> CONTRAT_DYNAMIZ laissé vide, à compléter une fois confirmé.
-  3. "Intitulé" construit selon le seul exemple donné dans le docx
-     ("Maintenance Player ..." / "PréVisite ...") -- le préfixe "Player"
-     est peut-être spécifique à ce type d'équipement (écran Cenareo), pas
-     une règle générale pour tout type de matériel SAV. À confirmer avec
-     un 2ᵉ exemple impliquant un autre type de matériel.
+  1. Mise en page exacte non vérifiée -- l'extraction repose sur la
+     présence des libellés exacts observés dans l'exemple fourni.
+  2. Contrat unique non documenté -> CONTRAT_DYNAMIZ laissé vide.
+  3. "Intitulé" construit selon le seul exemple donné dans le docx.
+
+--- Intégration Rule Engine (cette étape) ---
+  4. Ajout de 2 paramètres optionnels à `enrich_ticket`, en FIN de
+     signature (après `fichier_excel`) : `rag_decision: RagDecision |
+     None = None` et `activer_rule_engine: bool = False`. Désactivé par
+     défaut : rétrocompatibilité totale. DYNAMIZ PHARMA n'a qu'UN SEUL
+     point de sortie.
+     ⚠️ CONTRAT_DYNAMIZ n'est jamais assigné dans cet agent (reste
+     toujours vide) -> `client_rule` SE DÉCLENCHE réellement ici si une
+     RagDecision utilisable est fournie (contrairement à la majorité des
+     autres agents où le contrat est toujours pré-rempli) -- testé
+     explicitement.
 """
 
 import re
 import unicodedata
 
 from app.models.ticket import Ticket
+from app.models.rag_decision import RagDecision
+from app.services import rule_engine
 
 
 def _sans_accents(texte: str) -> str:
@@ -81,10 +75,22 @@ def _ajouter_si_absent(texte_existant: str, bloc: str) -> str:
     return bloc
 
 
-# --------------------------------------------------------------------------
-# Lecture d'un fichier Excel -> texte brut (réutilise les mêmes extracteurs
-# regex que pour le texte du mail, cf. avertissement du docstring)
-# --------------------------------------------------------------------------
+def _formater_recommandations_rule_engine(recommandations) -> str:
+    """
+    Formate les RuleRecommendation (rule_engine.executer) en un bloc de
+    texte destiné à commentaire_interne -- ne modifie JAMAIS un champ
+    métier directement (même politique que sur les autres agents migrés).
+    """
+    if not recommandations:
+        return ""
+    lignes = ["🧩 Recommandations du Rule Engine (à vérifier, jamais appliquées automatiquement) :"]
+    for reco in recommandations:
+        lignes.append(
+            f"- Champ '{reco.field}' -> '{reco.value}' "
+            f"(confiance={reco.confidence:.2f}, source={reco.source}) : {reco.reason}"
+        )
+    return "\n".join(lignes)
+
 
 def lire_excel_vers_texte(fichier, feuille: str | None = None) -> str:
     """Aplati toutes les cellules d'un xlsx en texte (1 valeur par ligne)."""
@@ -99,19 +105,12 @@ def lire_excel_vers_texte(fichier, feuille: str | None = None) -> str:
     return "\n".join(lignes)
 
 
-# --------------------------------------------------------------------------
-# Référentiel DYNAMIZ PHARMA
-# --------------------------------------------------------------------------
-
 CONTRAT_DYNAMIZ = ""  # TODO : libellé Pivot non documenté, cf. hypothèse 2
 
 TYPE_INSTALLATION = "INSTALLATION"
 TYPE_MAINTENANCE_SAV = "MAINTENANCE SAV"
 TYPE_PREVISITE = "PREVISITE"
 
-# Séquence ordonnée des libellés du formulaire : chaque champ est borné par
-# le libellé suivant dans cette liste (extraction "tout ce qu'il y a entre
-# ce libellé et le prochain").
 SEQUENCE_LABELS = [
     ("client_facturation", r"client\s+[àa]\s+facturer"),
     ("type_demande", r"intitul[ée] de la demande"),
@@ -144,12 +143,7 @@ RE_DATE_PATTERN = re.compile(r"\b(lundi|mardi|mercredi|jeudi|vendredi|samedi|dim
 
 
 def extraire_champs_dynamiz(texte: str) -> dict:
-    """
-    Extrait les champs du formulaire DYNAMIZ PHARMA à partir d'un texte
-    brut (mail et/ou Excel aplati, cf. avertissement du docstring du module).
-    Chaque champ = texte entre son libellé et le libellé suivant de
-    SEQUENCE_LABELS.
-    """
+    """Extrait les champs du formulaire DYNAMIZ PHARMA à partir d'un texte brut."""
     if not texte:
         return {}
     resultat: dict[str, str] = {}
@@ -180,11 +174,7 @@ def extraire_cp_ville(texte: str) -> tuple[str, str]:
 
 
 def extraire_contexte_et_intervention(description: str) -> tuple[str, str]:
-    """
-    Sépare le bloc Description en 2 : 'Contexte:' -> Problématique,
-    'Intervention à réaliser:' (+ tout ce qui suit) -> Travail attendu.
-    Si ces sous-sections ne sont pas trouvées, retourne (description, "").
-    """
+    """Sépare le bloc Description en 2 : 'Contexte:' -> Problématique, 'Intervention à réaliser:' -> Travail attendu."""
     if not description:
         return "", ""
     m_contexte = RE_CONTEXTE.search(description)
@@ -209,11 +199,7 @@ def detecter_type_demande(type_brut: str) -> str:
 
 
 def detecter_besoin_testeur_cable(texte: str) -> bool:
-    """
-    Docx : si le texte mentionne la nécessité de confirmer/vérifier qu'un
-    câble réseau est bien actif/connecté -> ajouter "Testeur de câbles"
-    dans Autre outillage spécifique.
-    """
+    """Câble réseau à vérifier/confirmer actif -> Testeur de câbles."""
     texte_n = _normaliser(texte)
     return ("cable" in texte_n) and any(
         mot in texte_n for mot in ("confirmer", "actif", "verifier", "diagnostiquer", "branche")
@@ -221,17 +207,12 @@ def detecter_besoin_testeur_cable(texte: str) -> bool:
 
 
 def ressemble_a_une_date(texte: str) -> bool:
-    """Heuristique : un jour de semaine suivi de chiffres (date/heure) à proximité."""
+    """Heuristique : un jour de semaine suivi de chiffres à proximité."""
     return bool(RE_DATE_PATTERN.search(texte or ""))
 
 
 def construire_intitule(type_demande: str, enseigne: str, ville: str) -> str:
-    """
-    Intitulé = "<Problème/motif> + Enseigne + Ville" (cf. exemples
-    DYNAMIZ_PHARMA.docx). "Maintenance Player" / "PréVisite" sont les
-    préfixes donnés en exemple dans le docx -- cf. hypothèse 3 (incertain
-    pour un matériel autre qu'un player/écran).
-    """
+    """Intitulé = "<Problème/motif> + Enseigne + Ville"."""
     prefixe = {
         TYPE_MAINTENANCE_SAV: "Maintenance Player",
         TYPE_PREVISITE: "PréVisite",
@@ -241,18 +222,25 @@ def construire_intitule(type_demande: str, enseigne: str, ville: str) -> str:
     return " ".join(parts)
 
 
-# --------------------------------------------------------------------------
-# Agent
-# --------------------------------------------------------------------------
-
-def enrich_ticket(ticket: Ticket, texte_source: str = "", fichier_excel=None) -> Ticket:
+def enrich_ticket(
+    ticket: Ticket,
+    texte_source: str = "",
+    fichier_excel=None,
+    rag_decision: RagDecision | None = None,
+    activer_rule_engine: bool = False,
+) -> Ticket:
     """
     Enrichit un Ticket à partir d'un texte brut (mail et/ou Excel aplati).
 
     `texte_source` : texte du mail. `fichier_excel` (optionnel) : chemin/
-    objet fichier de la pièce jointe Excel, aplati et concaténé à
-    texte_source si fourni (les deux sources sont traitées de façon
-    identique, cf. avertissement du docstring du module).
+    objet fichier de la pièce jointe Excel, aplati et concaténé.
+
+    `rag_decision` (optionnel) : une RagDecision déjà calculée en amont,
+    transmise telle quelle au Rule Engine si celui-ci est activé.
+
+    `activer_rule_engine` (par défaut False) : si True, exécute
+    rule_engine.executer(ticket, rag_decision) et ajoute ses
+    recommandations à commentaire_interne -- jamais à un champ métier.
     """
     notes: list[str] = []
 
@@ -276,8 +264,7 @@ def enrich_ticket(ticket: Ticket, texte_source: str = "", fichier_excel=None) ->
     if code_site_champ and code_site_champ != code_client:
         notes.append(
             f"Champ 'Code site' séparé ({code_site_champ!r}) différent du code client "
-            f"de facturation ({code_client!r}) — DYNAMIZ_PHARMA.docx dit d'utiliser le "
-            f"code client de facturation, vérifier qu'il n'y a pas d'incohérence."
+            f"de facturation ({code_client!r}) — vérifier qu'il n'y a pas d'incohérence."
         )
 
     enseigne = champs.get("nom_point_de_vente", "")
@@ -324,7 +311,6 @@ def enrich_ticket(ticket: Ticket, texte_source: str = "", fichier_excel=None) ->
 
     ticket.intervention.intitule = construire_intitule(type_demande, enseigne, ville)
 
-    # --- Matériel ---
     besoin_materiel_brut = champs.get("besoin_materiel", "")
     ticket.logistics.besoin_materiel = _normaliser(besoin_materiel_brut) == "oui"
     if ticket.logistics.besoin_materiel:
@@ -338,7 +324,6 @@ def enrich_ticket(ticket: Ticket, texte_source: str = "", fichier_excel=None) ->
             ticket.logistics.commentaire_logistique, f"Matériel à récupérer : {materiel_a_recuperer}"
         )
 
-    # --- Planification ---
     ticket.procedure.intervention_sur_site = True
     ticket.procedure.prise_rdv = False
 
@@ -380,8 +365,8 @@ def enrich_ticket(ticket: Ticket, texte_source: str = "", fichier_excel=None) ->
         notes.append("Testeur de câbles ajouté automatiquement (texte mentionnant la vérification d'un câble réseau actif/connecté).")
     ticket.procedure.autre_outillage = " ; ".join(outillage_parts)
 
-    ticket.procedure.technicien_anglophone = False  # toujours Non (docx)
-    ticket.procedure.procedure = False  # ⚠️ DYNAMIZ PHARMA = SEUL client avec Procédure=Non par défaut (cf. SKILL.md)
+    ticket.procedure.technicien_anglophone = False
+    ticket.procedure.procedure = False  # ⚠️ DYNAMIZ PHARMA = SEUL client avec Procédure=Non par défaut
 
     documents = champs.get("documents", "")
     if documents:
@@ -391,6 +376,13 @@ def enrich_ticket(ticket: Ticket, texte_source: str = "", fichier_excel=None) ->
         bloc_notes = "⚠️ Points à vérifier (générés automatiquement) :\n" + "\n".join(f"- {n}" for n in notes)
         ticket.intervention.commentaire_interne = _ajouter_si_absent(
             ticket.intervention.commentaire_interne, bloc_notes
+        )
+
+    if activer_rule_engine:
+        recommandations = rule_engine.executer(ticket, rag_decision)
+        bloc_recommandations = _formater_recommandations_rule_engine(recommandations)
+        ticket.intervention.commentaire_interne = _ajouter_si_absent(
+            ticket.intervention.commentaire_interne, bloc_recommandations
         )
 
     return ticket
