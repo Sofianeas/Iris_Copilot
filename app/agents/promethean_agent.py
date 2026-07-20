@@ -16,41 +16,49 @@ Découpage retenu :
      lien -- ça, c'est purement déterministe et testable sur texte_mail.
   2. `enrich_ticket` : logique métier des 2 scénarios documentés, mais
      prend en entrée `texte_page` (le texte de la page Promethean APRÈS
-     connexion+navigation -- pas texte_mail). La récupération de
-     `texte_page` est un problème séparé, cf. automation/promethean_navigateur.py.
-  3. AUCUN exemple réel de page Promethean disponible à ce jour (Sofiane :
-     "je n'ai pas d'exemple concret pour le moment") -- la détection de
-     scénario et l'extraction de champs depuis `texte_page` sont donc
-     basées sur des mots-clés anglais PLAUSIBLES (cf. hypothèses), pas
-     validées contre une vraie page. Ce fichier a été testé uniquement
-     contre un texte SYNTHÉTIQUE illustratif (cf. tests/test_promethean.py).
+     connexion+navigation -- pas texte_mail).
+  3. AUCUN exemple réel de page Promethean disponible à ce jour -- la
+     détection de scénario et l'extraction de champs depuis `texte_page`
+     sont basées sur des mots-clés anglais PLAUSIBLES, pas validées
+     contre une vraie page.
 
 ⚠️ Hypothèses à vérifier (plus nombreuses qu'à l'habitude, faute
    d'exemple réel) :
 
   1. La détection de scénario (écran vs pièce) utilise des mots-clés
-     anglais ("screen replacement" vs "part/component replacement") --
-     TOKI ne précise pas comment cette distinction apparaît réellement sur
-     la page. À CONFIRMER avec une vraie page.
+     anglais -- TOKI ne précise pas comment cette distinction apparaît
+     réellement sur la page. À CONFIRMER avec une vraie page.
   2. Le tableau "Nombre de tech et temps d'intervention" (TOKI) référence
-     une image absente du texte fourni (même problème que pour BUT) --
-     `nombre_techniciens`/`duree` ne sont PAS déduits automatiquement pour
-     le scénario écran, toujours signalés comme à compléter manuellement.
-  3. "Rechercher le modèle du matériel dans Google pour savoir si Active
-     Panel ou ActiveBoard et la taille de l'écran" (TOKI) est une étape de
-     recherche manuelle -- non automatisable ici, signalée comme rappel.
-  4. Les noms de champs anglais probables sur la page ("Main contact
-     address", "Comments", "Job request number"/"Case number") sont des
-     suppositions basées sur le vocabulaire du TOKI (qui mélange français
-     et quelques termes anglais) -- à corriger une fois une vraie page vue.
-  5. FootPrints (mentionné dans TOKI) est ignoré : remplacé par Pivot,
-     confirmé par Sofiane comme l'ancien système, plus utilisé.
+     une image absente du texte fourni -- non déduits automatiquement.
+  3. "Rechercher le modèle du matériel dans Google" (TOKI) est une étape
+     manuelle -- non automatisable ici.
+  4. Les noms de champs anglais probables sur la page sont des
+     suppositions.
+  5. FootPrints (mentionné dans TOKI) est ignoré : confirmé par Sofiane
+     comme l'ancien système, remplacé par Pivot.
+
+--- Intégration Rule Engine (cette étape) ---
+  6. Ajout de 2 paramètres optionnels à `enrich_ticket`, en FIN de
+     signature (après `texte_mail`) : `rag_decision: RagDecision | None =
+     None` et `activer_rule_engine: bool = False`. Désactivé par défaut :
+     rétrocompatibilité totale. PROMETHEAN n'a qu'UN SEUL point de sortie.
+     ⚠️ `contrat` n'est jamais assigné dans cet agent (reste toujours vide)
+     -> `client_rule` SE DÉCLENCHE réellement ici si une RagDecision
+     utilisable est fournie -- testé explicitement, même situation que
+     AXE E-SANTE et DYNAMIZ PHARMA.
+  7. Correction opportuniste : un caractère CJK parasite ("永続", artefact
+     d'encodage) s'était glissé dans une note interne ("contacts
+     génériques永続") -- remplacé par "permanents", texte français
+     correct. Repéré en relisant le fichier intégralement pour cette
+     livraison, sans rapport avec le Rule Engine.
 """
 
 import re
 import unicodedata
 
 from app.models.ticket import Ticket
+from app.models.rag_decision import RagDecision
+from app.services import rule_engine
 
 
 def _sans_accents(texte: str) -> str:
@@ -79,10 +87,22 @@ def _ajouter_si_absent(texte_existant: str, bloc: str) -> str:
     return bloc
 
 
-# --------------------------------------------------------------------------
-# Détection du mail + extraction du lien (déterministe, testable sur
-# texte_mail -- cf. point 1 du découpage dans le docstring)
-# --------------------------------------------------------------------------
+def _formater_recommandations_rule_engine(recommandations) -> str:
+    """
+    Formate les RuleRecommendation (rule_engine.executer) en un bloc de
+    texte destiné à commentaire_interne -- ne modifie JAMAIS un champ
+    métier directement (même politique que sur les autres agents migrés).
+    """
+    if not recommandations:
+        return ""
+    lignes = ["🧩 Recommandations du Rule Engine (à vérifier, jamais appliquées automatiquement) :"]
+    for reco in recommandations:
+        lignes.append(
+            f"- Champ '{reco.field}' -> '{reco.value}' "
+            f"(confiance={reco.confidence:.2f}, source={reco.source}) : {reco.reason}"
+        )
+    return "\n".join(lignes)
+
 
 EXPEDITEUR_PROMETHEAN = "donotreply@prometheanworld.com"
 SUJET_PROMETHEAN = "promethean onsite job request"
@@ -97,17 +117,10 @@ def est_mail_promethean(texte_mail: str) -> bool:
 
 
 def extraire_lien_promethean(texte_mail: str) -> str:
-    """
-    Isole le lien unique vers la demande Promethean. Chaque lien est
-    propre à une intervention (cf. TOKI) -- on prend le premier trouvé.
-    """
+    """Isole le lien unique vers la demande Promethean."""
     match = RE_URL.search(texte_mail or "")
     return match.group(0).rstrip(".,;)") if match else ""
 
-
-# --------------------------------------------------------------------------
-# Référentiel PROMETHEAN (issu de TOKI_PROMETHEAN.txt)
-# --------------------------------------------------------------------------
 
 SCENARIO_REMPLACEMENT_ECRAN = "ecran"
 SCENARIO_REMPLACEMENT_PIECE = "piece"
@@ -115,7 +128,6 @@ SCENARIO_REMPLACEMENT_PIECE = "piece"
 MOTS_CLES_ECRAN = ("screen replacement", "replace screen", "display replacement", "panel replacement")
 MOTS_CLES_PIECE = ("part replacement", "component replacement", "replace part", "repair")
 
-# Texte fixe -- scénario écran (cf. TOKI, étape 2)
 CONSIGNE_RDV_ECRAN = (
     "Lors de la prise de rendez-vous avec le contact sur site, merci de faire "
     "confirmer la livraison du matériel avant de planifier l'intervention. Si "
@@ -127,30 +139,23 @@ RAPPEL_EMBALLAGE_ECRAN = (
     "être placée au niveau du rez de chaussée. Prendre une photo pour preuve."
 )
 
-# Gabarit de ticket -- scénario pièce (cf. TOKI, étape 3 -- contacts à
-# ré-confirmer auprès de Sofiane, copiés tels quels depuis TOKI pour l'instant)
 SUPPORT_N3_PIECE = "Damien C. - +33 (0)6 33 35 09 69"
 CONTACT_CLIENT_PIECE = "Maxime C. - +33 6 12 46 22 82"
 SUPPORT_IRIS_PIECE = "09 88 66 03 32"
 
 
 def detecter_scenario(texte_page: str) -> tuple[str, bool]:
-    """
-    Déduit le scénario (écran vs pièce) depuis le texte de la page
-    Promethean. RECOMMANDATION uniquement (cf. hypothèse 1) -- mots-clés
-    anglais plausibles, jamais validés contre une vraie page.
-    Retourne (scenario, confiant).
-    """
+    """Déduit le scénario (écran vs pièce) depuis le texte de la page Promethean."""
     texte = _normaliser(texte_page)
     if any(mot in texte for mot in MOTS_CLES_ECRAN):
         return SCENARIO_REMPLACEMENT_ECRAN, True
     if any(mot in texte for mot in MOTS_CLES_PIECE):
         return SCENARIO_REMPLACEMENT_PIECE, True
-    return SCENARIO_REMPLACEMENT_ECRAN, False  # cas le plus détaillé dans TOKI, retenu par défaut
+    return SCENARIO_REMPLACEMENT_ECRAN, False
 
 
 def extraire_champ_page(texte_page: str, libelles: tuple) -> str:
-    """Extraction best-effort 'Label: valeur' pour un ou plusieurs libellés possibles (cf. hypothèse 4)."""
+    """Extraction best-effort 'Label: valeur' pour un ou plusieurs libellés possibles."""
     for libelle in libelles:
         pattern = re.compile(rf"{re.escape(libelle)}\s*:?\s*(.+)", re.IGNORECASE)
         match = pattern.search(texte_page or "")
@@ -159,18 +164,25 @@ def extraire_champ_page(texte_page: str, libelles: tuple) -> str:
     return ""
 
 
-# --------------------------------------------------------------------------
-# Agent
-# --------------------------------------------------------------------------
-
-def enrich_ticket(ticket: Ticket, texte_page: str = "", texte_mail: str = "") -> Ticket:
+def enrich_ticket(
+    ticket: Ticket,
+    texte_page: str = "",
+    texte_mail: str = "",
+    rag_decision: RagDecision | None = None,
+    activer_rule_engine: bool = False,
+) -> Ticket:
     """
     Enrichit un Ticket à partir du texte de la page Promethean APRÈS
-    connexion+navigation (PAS texte_mail -- cf. avertissement du docstring
-    du module). `texte_mail` est conservé en paramètre optionnel
-    uniquement pour récupérer le lien d'origine (à inclure dans la
-    Description, cf. TOKI) et le numéro de job request si présent dans le
-    mail plutôt que sur la page.
+    connexion+navigation (PAS texte_mail). `texte_mail` est conservé
+    uniquement pour récupérer le lien d'origine et le numéro de job
+    request si présent dans le mail plutôt que sur la page.
+
+    `rag_decision` (optionnel) : une RagDecision déjà calculée en amont,
+    transmise telle quelle au Rule Engine si celui-ci est activé.
+
+    `activer_rule_engine` (par défaut False) : si True, exécute
+    rule_engine.executer(ticket, rag_decision) et ajoute ses
+    recommandations à commentaire_interne -- jamais à un champ métier.
     """
     notes: list[str] = []
 
@@ -268,7 +280,7 @@ def enrich_ticket(ticket: Ticket, texte_page: str = "", texte_mail: str = "") ->
         notes.append(
             "Coordonnées de contact (support N3, contact client) copiées telles "
             "quelles depuis TOKI_PROMETHEAN.txt -- ce sont probablement des contacts "
-            "ponctuels liés à un cas précis, PAS des contacts génériques永続. À "
+            "ponctuels liés à un cas précis, PAS des contacts génériques permanents. À "
             "reconfirmer auprès de Sofiane avant d'automatiser plus largement."
         )
 
@@ -276,6 +288,13 @@ def enrich_ticket(ticket: Ticket, texte_page: str = "", texte_mail: str = "") ->
         bloc_notes = "⚠️ Points à vérifier (générés automatiquement) :\n" + "\n".join(f"- {n}" for n in notes)
         ticket.intervention.commentaire_interne = _ajouter_si_absent(
             ticket.intervention.commentaire_interne, bloc_notes
+        )
+
+    if activer_rule_engine:
+        recommandations = rule_engine.executer(ticket, rag_decision)
+        bloc_recommandations = _formater_recommandations_rule_engine(recommandations)
+        ticket.intervention.commentaire_interne = _ajouter_si_absent(
+            ticket.intervention.commentaire_interne, bloc_recommandations
         )
 
     return ticket
