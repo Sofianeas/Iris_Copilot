@@ -347,3 +347,303 @@ def enrich_ticket(
         )
 
     return ticket
+
+"""
+Agent Barron McCann.
+
+[... docstring métier inchangé ...]
+
+--- Harmonisation Framework des Agents (P3-424) ---
+Logique métier déplacée dans `_appliquer_regles_barron` (privée), appelée
+par `BarronAgent.analyze()`. `analyze()` ne pilote jamais le Rule Engine
+(Règle 9). `enrich_ticket()` reste un adaptateur de compatibilité.
+"""
+
+import re
+import unicodedata
+
+from app.agents.base_agent import BaseAgent
+from app.models.agent_contracts import AgentRequest, AgentResult
+from app.models.rag_decision import RagDecision
+from app.models.ticket import Ticket
+from app.services import rule_engine
+
+
+def _sans_accents(texte: str) -> str:
+    if not texte:
+        return ""
+    return "".join(
+        c for c in unicodedata.normalize("NFD", texte)
+        if unicodedata.category(c) != "Mn"
+    )
+
+
+def _normaliser(texte: str) -> str:
+    return _sans_accents((texte or "").strip().lower())
+
+
+def _ajouter_si_absent(texte_existant: str, bloc: str) -> str:
+    if not bloc:
+        return texte_existant
+    if texte_existant and bloc in texte_existant:
+        return texte_existant
+    if texte_existant:
+        return f"{texte_existant.strip()}\n\n{bloc}"
+    return bloc
+
+
+def _formater_recommandations_rule_engine(recommandations) -> str:
+    if not recommandations:
+        return ""
+    lignes = ["🧩 Recommandations du Rule Engine (à vérifier, jamais appliquées automatiquement) :"]
+    for reco in recommandations:
+        lignes.append(
+            f"- Champ '{reco.field}' -> '{reco.value}' "
+            f"(confiance={reco.confidence:.2f}, source={reco.source}) : {reco.reason}"
+        )
+    return "\n".join(lignes)
+
+
+PAYS_FRANCOPHONES = {
+    "fr", "france", "be", "belgique", "belgium", "ch", "suisse", "switzerland",
+    "lu", "luxembourg", "mc", "monaco",
+}
+
+
+def est_pays_francophone(pays: str) -> bool:
+    pays_normalise = _normaliser(pays)
+    if not pays_normalise:
+        return True
+    return pays_normalise in PAYS_FRANCOPHONES
+
+
+def est_france(pays: str) -> bool:
+    return _normaliser(pays) in ("fr", "france")
+
+
+def normaliser_code_postal_fr(code_postal: str) -> str:
+    cp = (code_postal or "").strip()
+    if cp.isdigit() and len(cp) == 4:
+        return f"0{cp}"
+    return cp
+
+
+def normaliser_telephone_fr(numero: str) -> str:
+    chiffres = re.sub(r"\D", "", numero or "")
+    if len(chiffres) == 9:
+        return f"0{chiffres}"
+    return (numero or "").strip()
+
+
+MOTS_ANGLAIS_COURANTS = (
+    " the ", " and ", " please ", " replace ", " faulty ", " required ",
+    " engineer ", " store ", " issue ", " request ", " unit ", " return ",
+)
+
+
+def semble_en_anglais(texte: str) -> bool:
+    texte_normalise = f" {_normaliser(texte)} "
+    return any(mot in texte_normalise for mot in MOTS_ANGLAIS_COURANTS)
+
+
+BARRON_CONTRACTS = {
+    "PRICING_FR": {
+        "contrat": "OD.BARRONM16.001.1 - Pricing FR - NBD SLA (ON DEMAND)",
+        "type": "MAINTENANCE", "sous_type": "TPE", "categorie": "",
+    },
+    "SMYTHS": {
+        "contrat": "IM.BARRONM16.001.1 - IMAC Smyths Toys (IMAC)",
+        "type": "ON DEMAND-IMAC", "sous_type": "", "categorie": "",
+    },
+    "CLAIRES": {
+        "contrat": "IM.BARRONM16.002.1 - CLAIRE'S FRANCE (IMAC)",
+        "type": "ON DEMAND-CLAIRES", "sous_type": "", "categorie": "",
+    },
+}
+
+SOUS_TYPES_CLAIRES = {
+    "INSTALLATION MAGASIN": "ON DEMAND - Installation Magasin",
+    "DEMONTAGE MAGASIN": "ON DEMAND - Demontage Magasin",
+    "RELOCALISATION (REMODELING)": "ON DEMAND - Relocalisation (Remodeling)",
+}
+SOUS_TYPES_SMYTHS = {
+    "CAISSES ET PERIPHERIQUE": "CAISSES ET PERIPHERIQUE",
+    "INSTALLATION MAGASIN": "INSTALLATION MAGASIN",
+}
+ENSEIGNES_SMYTHS = {"smyths toys", "smyths"}
+ENSEIGNES_CLAIRES = {"claire's", "claires", "claire's france"}
+
+
+def get_groupe(enseigne: str) -> str:
+    enseigne_normalisee = (enseigne or "").strip().lower()
+    if enseigne_normalisee in ENSEIGNES_SMYTHS:
+        return "SMYTHS"
+    if enseigne_normalisee in ENSEIGNES_CLAIRES:
+        return "CLAIRES"
+    return "PRICING_FR"
+
+
+def normaliser_sous_type(groupe: str, sous_type_brut: str) -> tuple[str, bool]:
+    if not sous_type_brut:
+        return "", False
+    cle = _sans_accents(sous_type_brut.strip().upper())
+    table = SOUS_TYPES_CLAIRES if groupe == "CLAIRES" else SOUS_TYPES_SMYTHS if groupe == "SMYTHS" else {}
+    for mot_cle, libelle_exact in table.items():
+        mot_cle_normalise = _sans_accents(mot_cle)
+        if mot_cle_normalise in cle or mot_cle_normalise.split()[0] in cle:
+            return libelle_exact, True
+    return sous_type_brut, False
+
+
+def deduire_nombre_techniciens(ticket: Ticket) -> tuple[int, str]:
+    texte_a_verifier = " ".join([
+        ticket.procedure.travail_attendu or "",
+        ticket.procedure.consignes_mission or "",
+        ticket.intervention.problematique or "",
+    ]).lower()
+    match = re.search(r"(\d{2,3})\s*[\"\u2033]|\b(\d{2,3})\s*pouces?\b", texte_a_verifier)
+    if match:
+        taille = int(match.group(1) or match.group(2))
+        if taille >= 43:
+            return 2, f"Nombre de techniciens déduit à 2 (écran {taille}'' détecté >= 43'')."
+    return ticket.procedure.nombre_techniciens or 1, ""
+
+
+def remplacer_ped_par_tpe(texte: str) -> str:
+    if not texte:
+        return texte
+    return re.sub(r"\bped\b", "TPE", texte, flags=re.IGNORECASE)
+
+
+def fusionner_references_incident(ticket: Ticket) -> str:
+    reference_barron = (ticket.intervention.code_projet or "").strip()
+    reference_client = (ticket.intervention.numero_incident_client or "").strip()
+    if reference_barron and reference_client:
+        return f"{reference_barron} – {reference_client}"
+    return reference_barron or reference_client
+
+
+def _appliquer_regles_barron(ticket: Ticket, texte_mail: str = "") -> Ticket:
+    """Logique métier BARRON pure (extraite de l'ancien `enrich_ticket`, sans le bloc Rule Engine)."""
+    notes: list[str] = []
+
+    ticket.customer.client = "BARRON MAC CANN LTD"
+    ticket.customer.numero_client = "BARRONM16"
+
+    pays = ticket.customer.pays
+
+    if est_france(pays):
+        if ticket.customer.code_postal:
+            ticket.customer.code_postal = normaliser_code_postal_fr(ticket.customer.code_postal)
+        if ticket.customer.portable:
+            ticket.customer.portable = normaliser_telephone_fr(ticket.customer.portable)
+        if ticket.customer.fixe:
+            ticket.customer.fixe = normaliser_telephone_fr(ticket.customer.fixe)
+
+    groupe = get_groupe(ticket.customer.enseigne)
+    infos_contrat = BARRON_CONTRACTS[groupe]
+
+    ticket.intervention.type_intervention = "Contrat"
+    ticket.intervention.contrat = infos_contrat["contrat"]
+    ticket.intervention.type = infos_contrat["type"]
+    ticket.intervention.categorie = infos_contrat["categorie"]
+
+    if infos_contrat["sous_type"]:
+        ticket.intervention.sous_type = infos_contrat["sous_type"]
+    else:
+        sous_type_normalise, reconnu = normaliser_sous_type(groupe, ticket.intervention.sous_type)
+        ticket.intervention.sous_type = sous_type_normalise
+        if sous_type_normalise and not reconnu:
+            notes.append(
+                f"Sous-type '{sous_type_normalise}' ({groupe}) non reconnu parmi les "
+                f"libellés Pivot connus — conservé tel quel, à corriger manuellement."
+            )
+        elif not sous_type_normalise:
+            notes.append(f"Sous-type introuvable dans le mail pour le groupe {groupe} — à compléter manuellement.")
+
+    if not ticket.intervention.code_projet and not ticket.intervention.numero_incident_client:
+        notes.append("Ni 'Barron McCann Reference' ni 'Customer Ref' trouvées — Numéro d'incident client à compléter manuellement.")
+    ticket.intervention.numero_incident_client = fusionner_references_incident(ticket)
+    ticket.intervention.code_projet = ""
+
+    ticket.intervention.origine = "Email"
+    ticket.procedure.intervention_sur_site = True
+    ticket.procedure.prise_rdv = False
+    ticket.procedure.procedure = True
+    ticket.validation.type_validation = "Client"
+
+    if not pays:
+        notes.append("Pays non renseigné — francophone supposé par défaut (technicien_anglophone=Non), à vérifier.")
+    ticket.procedure.technicien_anglophone = not est_pays_francophone(pays)
+
+    nombre_techniciens, note_deduction = deduire_nombre_techniciens(ticket)
+    ticket.procedure.nombre_techniciens = nombre_techniciens
+    if note_deduction:
+        notes.append(note_deduction)
+
+    ticket.intervention.problematique = remplacer_ped_par_tpe(ticket.intervention.problematique)
+    ticket.intervention.intitule = remplacer_ped_par_tpe(ticket.intervention.intitule)
+    ticket.procedure.travail_attendu = remplacer_ped_par_tpe(ticket.procedure.travail_attendu)
+    ticket.procedure.consignes_mission = remplacer_ped_par_tpe(ticket.procedure.consignes_mission)
+
+    if est_france(pays) and semble_en_anglais(ticket.intervention.problematique):
+        notes.append(
+            "Problématique semble être en anglais alors que l'intervention est en "
+            "France (BARRON_MAC_CANN.docx : français UNIQUEMENT si France) — à "
+            "traduire manuellement avant saisie."
+        )
+    elif not est_france(pays) and ticket.intervention.problematique:
+        notes.append(
+            "Intervention hors de France : vérifier que la Problématique est bien "
+            "en français PUIS en anglais (BARRON_MAC_CANN.docx) — non vérifiable "
+            "automatiquement."
+        )
+
+    if semble_en_anglais(ticket.procedure.travail_attendu):
+        notes.append(
+            "Travail attendu semble être en anglais — BARRON_MAC_CANN.docx demande "
+            "de le traduire en français ('Required Actions' à traduire) — à "
+            "traduire manuellement avant saisie."
+        )
+
+    if notes:
+        bloc_notes = "⚠️ Points à vérifier (générés automatiquement) :\n" + "\n".join(f"- {n}" for n in notes)
+        ticket.intervention.commentaire_interne = _ajouter_si_absent(
+            ticket.intervention.commentaire_interne, bloc_notes
+        )
+
+    return ticket
+
+
+class BarronAgent(BaseAgent):
+    """Agent BARRON conforme au contrat BaseAgent. Cf. `_appliquer_regles_barron` pour la logique métier."""
+
+    def analyze(self, request: AgentRequest) -> AgentResult:
+        try:
+            ticket = _appliquer_regles_barron(request.ticket, texte_mail=request.texte_mail)
+            return AgentResult(ticket=ticket, succes=True)
+        except Exception as exc:
+            return AgentResult(ticket=request.ticket, succes=False, erreur=str(exc))
+
+
+_AGENT = BarronAgent()
+
+
+def enrich_ticket(
+    ticket: Ticket,
+    texte_mail: str = "",
+    rag_decision: RagDecision | None = None,
+    activer_rule_engine: bool = False,
+) -> Ticket:
+    """⚠️ ADAPTATEUR DE COMPATIBILITÉ -- délègue à BarronAgent.analyze(), reproduit ici l'ancien comportement de activer_rule_engine."""
+    request = AgentRequest(ticket=ticket, texte_mail=texte_mail, rag_decision=rag_decision)
+    result = _AGENT.analyze(request)
+    ticket_resultat = result.ticket
+
+    if activer_rule_engine:
+        recommandations = rule_engine.executer(ticket_resultat, rag_decision)
+        bloc_recommandations = _formater_recommandations_rule_engine(recommandations)
+        ticket_resultat.intervention.commentaire_interne = _ajouter_si_absent(
+            ticket_resultat.intervention.commentaire_interne, bloc_recommandations
+        )
+    return ticket_resultat
