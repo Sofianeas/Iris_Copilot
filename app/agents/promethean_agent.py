@@ -298,3 +298,305 @@ def enrich_ticket(
         )
 
     return ticket
+
+"""
+Agent PROMETHEAN.
+
+[... docstring métier inchangé ...]
+
+--- Harmonisation Framework des Agents (P3-424) ---
+Logique métier déplacée dans `_appliquer_regles_promethean` (privée),
+appelée par `PrometheanAgent.analyze()`. `analyze()` ne pilote jamais le
+Rule Engine (Règle 9). `enrich_ticket()` reste un adaptateur de
+compatibilité.
+
+⚠️ LIMITATION DE CONTRAT SIGNALÉE (à valider architecturalement) :
+`AgentRequest` (gelé) n'expose qu'un seul champ texte (`texte_mail`), mais
+PROMETHEAN a structurellement DEUX entrées textuelles distinctes et non
+substituables :
+  - le texte du MAIL (pour en extraire le lien Promethean, cf.
+    `extraire_lien_promethean`) ;
+  - le texte de la PAGE Promethean après navigation (sur lequel toute la
+    logique métier de `_appliquer_regles_promethean` travaille réellement).
+
+Compromis retenu pour cette migration (PROMETHEAN n'étant pas en
+production) : `analyze()` traite `request.texte_mail` COMME s'il
+s'agissait du texte de PAGE -- l'extraction du lien depuis le vrai mail
+reste gérée par l'adaptateur `enrich_ticket()`, en dehors d'`analyze()`.
+Cette solution est provisoire et devra être révisée si/quand ce client
+est effectivement branché en production (cf. mission P3-424, section
+"Points nécessitant une validation architecturale").
+"""
+
+import re
+import unicodedata
+
+from app.agents.base_agent import BaseAgent
+from app.models.agent_contracts import AgentRequest, AgentResult
+from app.models.rag_decision import RagDecision
+from app.models.ticket import Ticket
+from app.services import rule_engine
+
+
+def _sans_accents(texte: str) -> str:
+    if not texte:
+        return ""
+    return "".join(
+        c for c in unicodedata.normalize("NFD", texte)
+        if unicodedata.category(c) != "Mn"
+    )
+
+
+def _normaliser(texte: str) -> str:
+    return _sans_accents((texte or "").strip().lower())
+
+
+def _ajouter_si_absent(texte_existant: str, bloc: str) -> str:
+    if not bloc:
+        return texte_existant
+    if texte_existant and bloc in texte_existant:
+        return texte_existant
+    if texte_existant:
+        return f"{texte_existant.strip()}\n\n{bloc}"
+    return bloc
+
+
+def _formater_recommandations_rule_engine(recommandations) -> str:
+    if not recommandations:
+        return ""
+    lignes = ["🧩 Recommandations du Rule Engine (à vérifier, jamais appliquées automatiquement) :"]
+    for reco in recommandations:
+        lignes.append(
+            f"- Champ '{reco.field}' -> '{reco.value}' "
+            f"(confiance={reco.confidence:.2f}, source={reco.source}) : {reco.reason}"
+        )
+    return "\n".join(lignes)
+
+
+EXPEDITEUR_PROMETHEAN = "donotreply@prometheanworld.com"
+SUJET_PROMETHEAN = "promethean onsite job request"
+
+RE_URL = re.compile(r"https?://\S+", re.IGNORECASE)
+
+
+def est_mail_promethean(texte_mail: str) -> bool:
+    texte_n = _normaliser(texte_mail)
+    return EXPEDITEUR_PROMETHEAN in texte_n or SUJET_PROMETHEAN in texte_n
+
+
+def extraire_lien_promethean(texte_mail: str) -> str:
+    match = RE_URL.search(texte_mail or "")
+    return match.group(0).rstrip(".,;)") if match else ""
+
+
+SCENARIO_REMPLACEMENT_ECRAN = "ecran"
+SCENARIO_REMPLACEMENT_PIECE = "piece"
+
+MOTS_CLES_ECRAN = ("screen replacement", "replace screen", "display replacement", "panel replacement")
+MOTS_CLES_PIECE = ("part replacement", "component replacement", "replace part", "repair")
+
+CONSIGNE_RDV_ECRAN = (
+    "Lors de la prise de rendez-vous avec le contact sur site, merci de faire "
+    "confirmer la livraison du matériel avant de planifier l'intervention. Si "
+    "matériel non livré, ne pas prendre de rendez-vous avec le contact."
+)
+RAPPEL_EMBALLAGE_ECRAN = (
+    "L'ancien écran doit être remis dans le carton du nouvel écran, le carton "
+    "doit être fixé sur la palette avec l'aide des attaches et la palette doit "
+    "être placée au niveau du rez de chaussée. Prendre une photo pour preuve."
+)
+
+SUPPORT_N3_PIECE = "Damien C. - +33 (0)6 33 35 09 69"
+CONTACT_CLIENT_PIECE = "Maxime C. - +33 6 12 46 22 82"
+SUPPORT_IRIS_PIECE = "09 88 66 03 32"
+
+
+def detecter_scenario(texte_page: str) -> tuple[str, bool]:
+    texte = _normaliser(texte_page)
+    if any(mot in texte for mot in MOTS_CLES_ECRAN):
+        return SCENARIO_REMPLACEMENT_ECRAN, True
+    if any(mot in texte for mot in MOTS_CLES_PIECE):
+        return SCENARIO_REMPLACEMENT_PIECE, True
+    return SCENARIO_REMPLACEMENT_ECRAN, False
+
+
+def extraire_champ_page(texte_page: str, libelles: tuple) -> str:
+    for libelle in libelles:
+        pattern = re.compile(rf"{re.escape(libelle)}\s*:?\s*(.+)", re.IGNORECASE)
+        match = pattern.search(texte_page or "")
+        if match:
+            return match.group(1).strip().splitlines()[0].strip()
+    return ""
+
+
+def _appliquer_regles_promethean(ticket: Ticket, texte_page: str = "", lien: str = "") -> Ticket:
+    """
+    Logique métier PROMETHEAN pure (extraite de l'ancien `enrich_ticket`,
+    sans le bloc Rule Engine). `lien` est optionnel (déjà extrait du mail
+    en amont) -- injecté dans la Description si fourni.
+    """
+    notes: list[str] = []
+
+    ticket.customer.client = "PROMETHEAN"
+    ticket.customer.commentaire = _ajouter_si_absent(
+        ticket.customer.commentaire, "Sous-entité Pivot attendue : PROMETHEAN LIMITED HEADQUARTERS (à vérifier)."
+    )
+
+    scenario, confiant = detecter_scenario(texte_page)
+    notes.append(
+        f"⚠️ SCÉNARIO déduit automatiquement : « {'Remplacement écran' if scenario == SCENARIO_REMPLACEMENT_ECRAN else 'Remplacement pièce'} »"
+        + ("" if confiant else " (PAR DÉFAUT, aucun mot-clé déterminant trouvé sur la page)")
+        + " — AUCUN EXEMPLE RÉEL DE PAGE N'A ÉTÉ UTILISÉ POUR VALIDER CETTE DÉTECTION. À confirmer manuellement avant saisie."
+    )
+
+    ticket.customer.adresse = extraire_champ_page(texte_page, ("main contact address", "site address", "address"))
+    numero_serie = extraire_champ_page(texte_page, ("serial number", "sn"))
+    ticket.intervention.numero_serie = numero_serie
+
+    job_request_number = extraire_champ_page(texte_page, ("job request number", "case number", "job number"))
+    ticket.intervention.numero_incident_client = job_request_number
+    if not job_request_number:
+        notes.append("Numéro de job request/case introuvable dans le texte de la page — à compléter manuellement.")
+
+    comments = extraire_champ_page(texte_page, ("comments", "comment"))
+
+    ticket.intervention.origine = "Email"
+    ticket.intervention.type_intervention = "Contrat"
+    ticket.intervention.categorie = "Prestation / Remplacement"
+
+    if scenario == SCENARIO_REMPLACEMENT_ECRAN:
+        ticket.intervention.type = "Intervention SANS pièce"
+        ticket.procedure.prise_rdv = True
+        ticket.procedure.intervention_sur_site = True
+        ticket.procedure.consignes_planification = _ajouter_si_absent(
+            ticket.procedure.consignes_planification, CONSIGNE_RDV_ECRAN
+        )
+
+        description_parts = []
+        if comments:
+            description_parts.append(comments)
+        else:
+            notes.append("Paragraphe 'Comments' introuvable sur la page — Description à compléter manuellement.")
+        description_parts.append(RAPPEL_EMBALLAGE_ECRAN)
+        if lien:
+            description_parts.append(f"Lien du formulaire Promethean : {lien}")
+        ticket.intervention.problematique = "\n\n".join(description_parts)
+
+        modele_materiel = extraire_champ_page(texte_page, ("model", "product model", "equipment model"))
+        if modele_materiel:
+            ticket.procedure.travail_attendu = f"Remplacer {modele_materiel} et faire test de fonctionnement."
+        else:
+            ticket.procedure.travail_attendu = "Remplacer *matériel* et faire test de fonctionnement."
+            notes.append("Modèle du matériel introuvable sur la page — à compléter manuellement dans le Travail attendu (\"*matériel*\").")
+
+        notes.append(
+            "Rechercher le modèle du matériel sur Google pour déterminer s'il s'agit "
+            "d'un Active Panel ou d'un ActiveBoard, et sa taille d'écran (cf. TOKI) "
+            "— étape manuelle, non automatisée ici."
+        )
+        notes.append(
+            "Nombre de techniciens et durée d'intervention dépendent d'un tableau "
+            "(taille d'écran -> nb tech/durée) référencé dans TOKI_PROMETHEAN.txt mais "
+            "dont l'image n'a pas été fournie — à compléter manuellement."
+        )
+        notes.append("Passer le dossier en '59-Intervention SANS pièce' sauf demande exceptionnelle de Promethean (cf. TOKI).")
+
+    else:
+        ticket.intervention.type = "Intervention SANS pièce"
+        ticket.procedure.prise_rdv = True
+        ticket.procedure.intervention_sur_site = True
+
+        modele_et_sn = " ".join(p for p in (extraire_champ_page(texte_page, ("model", "product model")), numero_serie) if p)
+        ticket.intervention.problematique = (
+            f"L'écran ({modele_et_sn or '[modèle + numéro de série à compléter]'}) "
+            f"présente un dysfonctionnement sur site."
+            + (f"\n\nDétails JOB MANAGER : {comments}" if comments else "")
+        )
+        ticket.procedure.travail_attendu = (
+            "Procéder au remplacement de la pièce indiquée en respectant les "
+            "procédures d'installation disponibles via le lien/token fourni.\n\n"
+            "La pièce de remplacement aura déjà été livrée sur site avant "
+            "l'intervention.\n\n"
+            "Merci de laisser la ou les pièces remplacées sur site après l'intervention."
+        )
+        ticket.intervention.commentaire_interne = _ajouter_si_absent(
+            ticket.intervention.commentaire_interne,
+            f"Support technique niveau 3 (difficulté technique) : {SUPPORT_N3_PIECE}\n"
+            f"Contact client : {CONTACT_CLIENT_PIECE}\n"
+            f"En cas de non-résolution, contacter le support IRIS au {SUPPORT_IRIS_PIECE} "
+            f"avant de quitter le site.",
+        )
+        notes.append(
+            "Coordonnées de contact (support N3, contact client) copiées telles "
+            "quelles depuis TOKI_PROMETHEAN.txt -- probablement des contacts "
+            "ponctuels, PAS des contacts génériques permanents. À reconfirmer "
+            "auprès de Sofiane avant d'automatiser plus largement."
+        )
+
+    if notes:
+        bloc_notes = "⚠️ Points à vérifier (générés automatiquement) :\n" + "\n".join(f"- {n}" for n in notes)
+        ticket.intervention.commentaire_interne = _ajouter_si_absent(
+            ticket.intervention.commentaire_interne, bloc_notes
+        )
+
+    return ticket
+
+
+class PrometheanAgent(BaseAgent):
+    """
+    Agent PROMETHEAN conforme au contrat BaseAgent.
+
+    ⚠️ cf. avertissement du docstring du module : `request.texte_mail` est
+    ici traité COMME le texte de la page Promethean (pas comme le texte du
+    mail d'origine) -- limitation provisoire du contrat AgentRequest gelé,
+    signalée pour validation architecturale.
+    """
+
+    def analyze(self, request: AgentRequest) -> AgentResult:
+        try:
+            ticket = _appliquer_regles_promethean(request.ticket, texte_page=request.texte_mail)
+            return AgentResult(ticket=ticket, succes=True)
+        except Exception as exc:
+            return AgentResult(ticket=request.ticket, succes=False, erreur=str(exc))
+
+
+_AGENT = PrometheanAgent()
+
+
+def enrich_ticket(
+    ticket: Ticket,
+    texte_page: str = "",
+    texte_mail: str = "",
+    rag_decision: RagDecision | None = None,
+    activer_rule_engine: bool = False,
+) -> Ticket:
+    """
+    ⚠️ ADAPTATEUR DE COMPATIBILITÉ -- reçoit toujours les 2 textes
+    séparément (comportement historique inchangé). Extrait le lien depuis
+    `texte_mail` lui-même (hors d'analyze(), cf. limitation de contrat),
+    délègue la logique métier à PrometheanAgent.analyze() en mappant
+    texte_page -> request.texte_mail, puis reproduit l'ancien comportement
+    de `activer_rule_engine=True`.
+    """
+    lien = extraire_lien_promethean(texte_mail)
+
+    request = AgentRequest(ticket=ticket, texte_mail=texte_page, rag_decision=rag_decision)
+    result = _AGENT.analyze(request)
+    ticket_resultat = result.ticket
+
+    # Le lien doit être injecté dans la Description scénario écran -- déjà
+    # géré par _appliquer_regles_promethean via son paramètre `lien`, mais
+    # celui-ci n'est pas accessible depuis analyze() (limitation de
+    # contrat) -- ré-appliqué ici pour préserver le comportement historique.
+    if lien and lien not in (ticket_resultat.intervention.problematique or ""):
+        ticket_resultat.intervention.problematique = _ajouter_si_absent(
+            ticket_resultat.intervention.problematique, f"Lien du formulaire Promethean : {lien}"
+        )
+
+    if activer_rule_engine:
+        recommandations = rule_engine.executer(ticket_resultat, rag_decision)
+        bloc_recommandations = _formater_recommandations_rule_engine(recommandations)
+        ticket_resultat.intervention.commentaire_interne = _ajouter_si_absent(
+            ticket_resultat.intervention.commentaire_interne, bloc_recommandations
+        )
+    return ticket_resultat
