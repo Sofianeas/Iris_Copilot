@@ -7,38 +7,60 @@ toutes les règles enregistrées, collecte leurs recommandations, élimine
 les doublons, et journalise chaque étape.
 
 Ne modifie JAMAIS le Ticket. Le métier ne dépend jamais directement du
-VectorStore ici : ce moteur ne reçoit qu'une RagDecision déjà tranchée
-(produite ailleurs, cf. rag_integration_layer/rag_decision_service),
-jamais de dossier_persistance ni d'embed_fn -- aucune connaissance du RAG
-brut, uniquement de son résultat final typé.
+VectorStore ici : ce moteur ne reçoit qu'une RagDecision déjà tranchée,
+jamais de dossier_persistance ni d'embed_fn.
 
-Contrat d'une règle (RegleFn) : chaque fichier de app/rules/ expose une
-fonction `evaluer(ticket: Ticket, rag_decision: RagDecision | None) ->
-list[RuleRecommendation]`, indépendante des autres, testable isolément,
-qui ne modifie jamais `ticket`.
+--- Harmonisation Framework des Rules (P3-430) ---
+`REGLES` contient désormais des instances de `BaseRule` (PriorityRule(),
+ClientRule()) plutôt que des fonctions nues -- comportement fonctionnel
+STRICTEMENT INCHANGÉ (mêmes règles, même déduplication, même isolation
+des exceptions, même journalisation).
+
+`executer()` reste compatible avec une règle passée comme fonction nue
+(callable direct) plutôt qu'une instance BaseRule -- nécessaire pour ne
+pas casser les tests existants qui injectent des fonctions factices dans
+REGLES (règle cassée, règle en doublon, etc., cf.
+tests/test_rule_engine.py). Une règle est appelée via `.evaluate()` si
+c'est une instance BaseRule, ou directement si c'est un callable.
 """
 
 import logging
-from typing import Callable
+from typing import Callable, Union
 
 from app.models.rag_decision import RagDecision
 from app.models.rule_recommendation import RuleRecommendation
 from app.models.ticket import Ticket
-from app.rules.client_rule import evaluer as regle_client
-from app.rules.priority_rule import evaluer as regle_priorite
+from app.rules.base_rule import BaseRule
+from app.rules.client_rule import ClientRule
+from app.rules.priority_rule import PriorityRule
 
 logger = logging.getLogger("iris_copilot.rule_engine")
 
 RegleFn = Callable[[Ticket, RagDecision | None], list[RuleRecommendation]]
+Regle = Union[BaseRule, RegleFn]
 
-# Registre explicite des règles actives -- volontairement une simple liste
-# (pas de découverte dynamique de fichiers) : plus transparent, plus facile
-# à auditer/tester qu'un mécanisme de plugin implicite, cohérent avec
-# "éviter la complexité inutile".
-REGLES: list[RegleFn] = [
-    regle_priorite,
-    regle_client,
+# Registre explicite des règles actives (BaseRule désormais, cf.
+# harmonisation P3-430) -- volontairement une simple liste, pas de
+# découverte dynamique (cf. décision de gouvernance : "architecture
+# simple, explicite, facilement maintenable", pas de discovery/DI/plugins).
+REGLES: list[Regle] = [
+    PriorityRule(),
+    ClientRule(),
 ]
+
+
+def _identifiant_regle(regle: Regle) -> str:
+    """Identifiant lisible pour le logging -- fonctionne pour une instance BaseRule ou une fonction nue."""
+    if isinstance(regle, BaseRule):
+        return f"{type(regle).__module__}.{type(regle).__name__}"
+    return getattr(regle, "__module__", repr(regle))
+
+
+def _appeler_regle(regle: Regle, ticket: Ticket, rag_decision: RagDecision | None) -> list[RuleRecommendation]:
+    """Appelle une règle, qu'elle soit une instance BaseRule (.evaluate()) ou une fonction historique (callable direct)."""
+    if isinstance(regle, BaseRule):
+        return regle.evaluate(ticket, rag_decision)
+    return regle(ticket, rag_decision)
 
 
 def _dedupliquer(recommandations: list[RuleRecommendation]) -> list[RuleRecommendation]:
@@ -62,14 +84,13 @@ def executer(ticket: Ticket, rag_decision: RagDecision | None = None) -> list[Ru
 
     Une règle qui lève une exception est journalisée en erreur et
     IGNORÉE -- n'interrompt jamais l'exécution des autres règles.
-    L'indépendance entre règles s'applique aussi à leurs échecs.
     """
     toutes_recommandations: list[RuleRecommendation] = []
 
     for regle in REGLES:
-        nom_regle = regle.__module__
+        nom_regle = _identifiant_regle(regle)
         try:
-            recommandations = regle(ticket, rag_decision)
+            recommandations = _appeler_regle(regle, ticket, rag_decision)
         except Exception as exc:
             logger.error("regle=%s statut=exception erreur=%r", nom_regle, exc)
             continue
