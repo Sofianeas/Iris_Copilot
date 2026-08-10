@@ -1,64 +1,201 @@
 # tests/workflows/test_documentation_workflow.py
 #
-# Tests du premier Workflow concret du Framework. Vérifie le contrat
-# (héritage des marqueurs WorkflowRequest/WorkflowResult, conformité
-# BaseWorkflow) et le comportement HONNÊTE de execute() en l'absence de
-# Provider/Repository concret (cf. WF-DOC-001) -- ne teste aucune vraie
-# logique documentaire, puisqu'aucune n'existe encore.
+# Suite officielle du DocumentationWorkflow raccordé par injection
+# (WF-DOC-003). Utilise exclusivement des DOUBLES DE TEST (fakes)
+# implémentant les interfaces abstraites DocumentationRepository /
+# DocumentationProvider -- jamais une implémentation concrète, jamais
+# ChromaDB/Gemini/SDK. Vérifie l'orchestration (Repository -> Provider en
+# repli), la propagation des erreurs, et la compatibilité avec les
+# contrats WorkflowRequest/WorkflowResult.
 
 from app.models.documentation_workflow import DocumentationWorkflowRequest, DocumentationWorkflowResult
 from app.models.workflow_contracts import WorkflowRequest, WorkflowResult
-from app.workflows.base_workflow import BaseWorkflow
+from app.providers.documentation_provider import DocumentationProvider
+from app.repositories.documentation_repository import DocumentationRepository
 from app.workflows.documentation_workflow import DocumentationWorkflow
 
 
-def test_documentation_workflow_request_herite_du_marqueur_commun():
-    request = DocumentationWorkflowRequest(client="ADOPT", question="test")
+# --------------------------------------------------------------------------
+# Doubles de test (fakes) -- implémentent STRICTEMENT les interfaces
+# abstraites, aucune dépendance à une implémentation concrète.
+# --------------------------------------------------------------------------
 
-    assert isinstance(request, WorkflowRequest)
+class FakeDocumentationRepository(DocumentationRepository):
+    """Fake configurable : retourne une réponse fixe, None, ou lève une exception."""
+
+    def __init__(self, reponse=None, leve_exception=False):
+        self._reponse = reponse
+        self._leve_exception = leve_exception
+        self.appels = []
+
+    def save(self, entity):
+        pass
+
+    def get_by_id(self, entity_id):
+        return None
+
+    def find_by_question(self, client, question):
+        self.appels.append((client, question))
+        if self._leve_exception:
+            raise RuntimeError("panne simulee du repository")
+        return self._reponse
 
 
-def test_documentation_workflow_result_herite_du_marqueur_commun():
-    result = DocumentationWorkflowResult(succes=True, reponse="test", source="test")
+class FakeDocumentationProvider(DocumentationProvider):
+    """Fake configurable : retourne une réponse fixe, None, ou lève une exception."""
 
-    assert isinstance(result, WorkflowResult)
+    def __init__(self, reponse=None, leve_exception=False):
+        self._reponse = reponse
+        self._leve_exception = leve_exception
+        self.appels = []
+
+    def fetch(self, request):
+        self.appels.append(request)
+        if self._leve_exception:
+            raise RuntimeError("panne simulee du provider")
+        return self._reponse
 
 
-def test_documentation_workflow_est_bien_un_base_workflow():
-    workflow = DocumentationWorkflow()
+# --------------------------------------------------------------------------
+# Injection des dépendances
+# --------------------------------------------------------------------------
 
-    assert isinstance(workflow, BaseWorkflow)
+def test_injection_correcte_des_dependances():
+    repository = FakeDocumentationRepository(reponse="reponse repo")
+    provider = FakeDocumentationProvider()
+
+    workflow = DocumentationWorkflow(repository=repository, provider=provider)
+
+    assert workflow._repository is repository
+    assert workflow._provider is provider
 
 
-def test_documentation_workflow_execute_retourne_un_echec_explicite():
-    """Aucun Provider/Repository concret n'existe encore -- execute() ne doit jamais fabriquer une réponse."""
-    workflow = DocumentationWorkflow()
-    request = DocumentationWorkflowRequest(client="ADOPT", question="Comment gérer un CATO ?")
+def test_utilise_exclusivement_les_interfaces_abstraites():
+    """Les fakes n'héritent QUE des interfaces abstraites -- aucune implémentation concrète n'est importée nulle part dans ce test."""
+    repository = FakeDocumentationRepository()
+    provider = FakeDocumentationProvider()
 
-    resultat = workflow.execute(request)
+    assert isinstance(repository, DocumentationRepository)
+    assert isinstance(provider, DocumentationProvider)
+
+
+# --------------------------------------------------------------------------
+# Comportement nominal (Repository -> Provider en repli)
+# --------------------------------------------------------------------------
+
+def test_repository_trouve_une_reponse_provider_jamais_appele():
+    repository = FakeDocumentationRepository(reponse="Voir Anne ou David via Teams.")
+    provider = FakeDocumentationProvider(reponse="ne devrait jamais etre utilise")
+
+    workflow = DocumentationWorkflow(repository=repository, provider=provider)
+    resultat = workflow.execute(DocumentationWorkflowRequest(client="ADOPT", question="Comment gerer un CATO ?"))
+
+    assert resultat.succes is True
+    assert resultat.reponse == "Voir Anne ou David via Teams."
+    assert resultat.source == "repository"
+    assert provider.appels == []
+
+
+def test_repository_ne_trouve_rien_fallback_vers_provider():
+    repository = FakeDocumentationRepository(reponse=None)
+    provider = FakeDocumentationProvider(reponse="reponse trouvee via le provider")
+
+    workflow = DocumentationWorkflow(repository=repository, provider=provider)
+    resultat = workflow.execute(DocumentationWorkflowRequest(client="ADOPT", question="Question rare"))
+
+    assert resultat.succes is True
+    assert resultat.reponse == "reponse trouvee via le provider"
+    assert resultat.source == "provider"
+    assert repository.appels == [("ADOPT", "Question rare")]
+
+
+def test_ni_repository_ni_provider_ne_trouvent_rien():
+    repository = FakeDocumentationRepository(reponse=None)
+    provider = FakeDocumentationProvider(reponse=None)
+
+    workflow = DocumentationWorkflow(repository=repository, provider=provider)
+    resultat = workflow.execute(DocumentationWorkflowRequest(client="ADOPT", question="Question inconnue"))
 
     assert resultat.succes is False
     assert resultat.reponse is None
     assert resultat.source is None
-    assert resultat.erreur is not None
+    assert "ADOPT" in resultat.erreur
+    assert "Question inconnue" in resultat.erreur
 
 
-def test_documentation_workflow_execute_erreur_trace_la_requete_recue():
-    """L'erreur doit rester traçable -- mentionne le client et la question reçus, utile pour le debug."""
-    workflow = DocumentationWorkflow()
-    request = DocumentationWorkflowRequest(client="BARRON", question="Question specifique test")
+# --------------------------------------------------------------------------
+# Validation du contrat d'entrée
+# --------------------------------------------------------------------------
 
-    resultat = workflow.execute(request)
+def test_requete_avec_client_vide_est_rejetee_sans_appeler_les_dependances():
+    repository = FakeDocumentationRepository(reponse="ne devrait jamais etre atteint")
+    provider = FakeDocumentationProvider()
 
-    assert "BARRON" in resultat.erreur
-    assert "Question specifique test" in resultat.erreur
-
-
-def test_documentation_workflow_execute_ne_leve_jamais_exception():
-    """Conforme au contrat BaseWorkflow : jamais d'exception métier non gérée vers l'appelant."""
-    workflow = DocumentationWorkflow()
-    request = DocumentationWorkflowRequest(client="", question="")
-
-    resultat = workflow.execute(request)  # ne doit pas lever, même avec une requête vide
+    workflow = DocumentationWorkflow(repository=repository, provider=provider)
+    resultat = workflow.execute(DocumentationWorkflowRequest(client="", question="question valide"))
 
     assert resultat.succes is False
+    assert "requis" in resultat.erreur.lower()
+    assert repository.appels == []
+    assert provider.appels == []
+
+
+def test_requete_avec_question_vide_est_rejetee():
+    repository = FakeDocumentationRepository()
+    provider = FakeDocumentationProvider()
+
+    workflow = DocumentationWorkflow(repository=repository, provider=provider)
+    resultat = workflow.execute(DocumentationWorkflowRequest(client="ADOPT", question=""))
+
+    assert resultat.succes is False
+    assert repository.appels == []
+
+
+# --------------------------------------------------------------------------
+# Propagation des erreurs (SD-007) -- jamais d'exception hors de execute()
+# --------------------------------------------------------------------------
+
+def test_exception_du_repository_est_capturee_et_encapsulee():
+    repository = FakeDocumentationRepository(leve_exception=True)
+    provider = FakeDocumentationProvider(reponse="ne devrait jamais etre atteint")
+
+    workflow = DocumentationWorkflow(repository=repository, provider=provider)
+    resultat = workflow.execute(DocumentationWorkflowRequest(client="ADOPT", question="test"))
+
+    assert resultat.succes is False
+    assert "Repository" in resultat.erreur
+    assert "panne simulee" in resultat.erreur
+    assert provider.appels == []
+
+
+def test_exception_du_provider_est_capturee_et_encapsulee():
+    repository = FakeDocumentationRepository(reponse=None)
+    provider = FakeDocumentationProvider(leve_exception=True)
+
+    workflow = DocumentationWorkflow(repository=repository, provider=provider)
+    resultat = workflow.execute(DocumentationWorkflowRequest(client="ADOPT", question="test"))
+
+    assert resultat.succes is False
+    assert "Provider" in resultat.erreur
+    assert "panne simulee" in resultat.erreur
+
+
+# --------------------------------------------------------------------------
+# Compatibilité avec les contrats WorkflowRequest / WorkflowResult
+# --------------------------------------------------------------------------
+
+def test_le_resultat_reste_compatible_avec_workflow_result():
+    repository = FakeDocumentationRepository(reponse="reponse")
+    provider = FakeDocumentationProvider()
+
+    workflow = DocumentationWorkflow(repository=repository, provider=provider)
+    resultat = workflow.execute(DocumentationWorkflowRequest(client="ADOPT", question="test"))
+
+    assert isinstance(resultat, DocumentationWorkflowResult)
+    assert isinstance(resultat, WorkflowResult)
+
+
+def test_la_requete_reste_compatible_avec_workflow_request():
+    request = DocumentationWorkflowRequest(client="ADOPT", question="test")
+
+    assert isinstance(request, WorkflowRequest)
