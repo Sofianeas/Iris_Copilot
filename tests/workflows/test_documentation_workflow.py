@@ -7,6 +7,11 @@
 # ChromaDB/Gemini/SDK. Vérifie l'orchestration (Repository -> Provider en
 # repli), la propagation des erreurs, et la compatibilité avec les
 # contrats WorkflowRequest/WorkflowResult.
+#
+# Révisé lors de la consolidation technique (WF-DOC-004) : ajout de la
+# vérification des arguments réellement transmis au Provider (absente
+# auparavant), et renforcement du test de non-dépendance à une
+# implémentation concrète.
 
 from app.models.documentation_workflow import DocumentationWorkflowRequest, DocumentationWorkflowResult
 from app.models.workflow_contracts import WorkflowRequest, WorkflowResult
@@ -14,11 +19,6 @@ from app.providers.documentation_provider import DocumentationProvider
 from app.repositories.documentation_repository import DocumentationRepository
 from app.workflows.documentation_workflow import DocumentationWorkflow
 
-
-# --------------------------------------------------------------------------
-# Doubles de test (fakes) -- implémentent STRICTEMENT les interfaces
-# abstraites, aucune dépendance à une implémentation concrète.
-# --------------------------------------------------------------------------
 
 class FakeDocumentationRepository(DocumentationRepository):
     """Fake configurable : retourne une réponse fixe, None, ou lève une exception."""
@@ -56,10 +56,6 @@ class FakeDocumentationProvider(DocumentationProvider):
         return self._reponse
 
 
-# --------------------------------------------------------------------------
-# Injection des dépendances
-# --------------------------------------------------------------------------
-
 def test_injection_correcte_des_dependances():
     repository = FakeDocumentationRepository(reponse="reponse repo")
     provider = FakeDocumentationProvider()
@@ -70,18 +66,29 @@ def test_injection_correcte_des_dependances():
     assert workflow._provider is provider
 
 
-def test_utilise_exclusivement_les_interfaces_abstraites():
-    """Les fakes n'héritent QUE des interfaces abstraites -- aucune implémentation concrète n'est importée nulle part dans ce test."""
-    repository = FakeDocumentationRepository()
-    provider = FakeDocumentationProvider()
+def test_workflow_ne_depend_que_du_comportement_contractuel_des_fakes():
+    """
+    Renforcé (WF-DOC-004) : au lieu de vérifier une tautologie
+    (isinstance d'un fake sur sa propre classe parente, garanti par
+    construction), vérifie que le WORKFLOW se comporte correctement
+    avec DEUX fakes totalement indépendants et interchangeables --
+    preuve concrète qu'il ne dépend que du contrat abstrait, pas d'une
+    implémentation particulière.
+    """
+    repository_a = FakeDocumentationRepository(reponse="reponse A")
+    provider_a = FakeDocumentationProvider()
+    workflow_a = DocumentationWorkflow(repository=repository_a, provider=provider_a)
 
-    assert isinstance(repository, DocumentationRepository)
-    assert isinstance(provider, DocumentationProvider)
+    repository_b = FakeDocumentationRepository(reponse="reponse B")
+    provider_b = FakeDocumentationProvider()
+    workflow_b = DocumentationWorkflow(repository=repository_b, provider=provider_b)
 
+    resultat_a = workflow_a.execute(DocumentationWorkflowRequest(client="ADOPT", question="q"))
+    resultat_b = workflow_b.execute(DocumentationWorkflowRequest(client="ADOPT", question="q"))
 
-# --------------------------------------------------------------------------
-# Comportement nominal (Repository -> Provider en repli)
-# --------------------------------------------------------------------------
+    assert resultat_a.reponse == "reponse A"
+    assert resultat_b.reponse == "reponse B"
+
 
 def test_repository_trouve_une_reponse_provider_jamais_appele():
     repository = FakeDocumentationRepository(reponse="Voir Anne ou David via Teams.")
@@ -107,6 +114,7 @@ def test_repository_ne_trouve_rien_fallback_vers_provider():
     assert resultat.reponse == "reponse trouvee via le provider"
     assert resultat.source == "provider"
     assert repository.appels == [("ADOPT", "Question rare")]
+    assert provider.appels == [("ADOPT", "Question rare")]
 
 
 def test_ni_repository_ni_provider_ne_trouvent_rien():
@@ -122,10 +130,6 @@ def test_ni_repository_ni_provider_ne_trouvent_rien():
     assert "ADOPT" in resultat.erreur
     assert "Question inconnue" in resultat.erreur
 
-
-# --------------------------------------------------------------------------
-# Validation du contrat d'entrée
-# --------------------------------------------------------------------------
 
 def test_requete_avec_client_vide_est_rejetee_sans_appeler_les_dependances():
     repository = FakeDocumentationRepository(reponse="ne devrait jamais etre atteint")
@@ -151,10 +155,6 @@ def test_requete_avec_question_vide_est_rejetee():
     assert repository.appels == []
 
 
-# --------------------------------------------------------------------------
-# Propagation des erreurs (SD-007) -- jamais d'exception hors de execute()
-# --------------------------------------------------------------------------
-
 def test_exception_du_repository_est_capturee_et_encapsulee():
     repository = FakeDocumentationRepository(leve_exception=True)
     provider = FakeDocumentationProvider(reponse="ne devrait jamais etre atteint")
@@ -179,10 +179,6 @@ def test_exception_du_provider_est_capturee_et_encapsulee():
     assert "Provider" in resultat.erreur
     assert "panne simulee" in resultat.erreur
 
-
-# --------------------------------------------------------------------------
-# Compatibilité avec les contrats WorkflowRequest / WorkflowResult
-# --------------------------------------------------------------------------
 
 def test_le_resultat_reste_compatible_avec_workflow_result():
     repository = FakeDocumentationRepository(reponse="reponse")
