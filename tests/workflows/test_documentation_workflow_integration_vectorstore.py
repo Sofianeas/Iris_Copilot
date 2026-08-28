@@ -179,4 +179,7 @@ def test_workflow_ne_connait_rien_de_chromadb_ni_des_embeddings():
     )
     # Confirme aussi positivement que les imports réels restent bien
     # circonscrits aux couches abstraites du Framework.
-    assert modules_importes <= {"app"}
+    modules_standard_autorises = {"app", "logging", "time"}
+    assert modules_importes <= modules_standard_autorises, (
+    f"imports inattendus : {modules_importes - modules_standard_autorises}"
+    )
