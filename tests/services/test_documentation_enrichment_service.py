@@ -91,3 +91,30 @@ def test_aucune_reponse_trouvee_ticket_inchange(tmp_path):
     )
 
     assert ticket_resultat.intervention.commentaire_interne == "commentaire original"
+
+def test_isolation_par_client_avec_deux_corpus_distincts(tmp_path):
+    """Vérifie que la connexion fonctionne pour un 2e client (BARRON), sans rien de câblé en dur pour ADOPT spécifiquement."""
+    dossier_sources = tmp_path / "sources"
+    dossier_sources.mkdir()
+    (dossier_sources / "ADOPT.docx").write_text(ADOPT_DOCX_REEL, encoding="utf-8")
+    (dossier_sources / "BARRON_MAC_CANN.docx").write_text(
+        "BARRON MAC CANN\n\n*Note importante : Remplacer PED par TPE\n"
+        "Pour information, chez Barron Mac Cann quand il est dit un PED c'est un TPE en France.\n",
+        encoding="utf-8",
+    )
+    dossier_persistance = tmp_path / "vectorstore"
+    chunks = construire_chunks(dossier_sources)
+    embedder = make_tfidf_embedder([c.texte for c in chunks])
+    construire_vectorstore(dossier_sources, dossier_persistance, embed_fn=embedder)
+
+    repository = InMemoryDocumentationRepository()
+    provider = VectorStoreDocumentationProvider(dossier_persistance=dossier_persistance, embed_fn=embedder)
+    workflow = DocumentationWorkflow(repository=repository, provider=provider)
+
+    ticket_barron = Ticket()
+    ticket_enrichi = enrichir_ticket_avec_documentation(
+        ticket_barron, client="BARRON", question="Que signifie PED chez ce client ?", documentation_workflow=workflow,
+    )
+
+    assert "TPE" in ticket_enrichi.intervention.commentaire_interne
+    assert "CATO" not in ticket_enrichi.intervention.commentaire_interne  # jamais de fuite du corpus ADOPT
