@@ -98,3 +98,61 @@ def test_exception_traiter_mail_complet_remonte_sans_etre_avalee(monkeypatch):
         mail_documentation_pipeline.traiter_mail_avec_documentation(
             texte_mail="mail non reconnaissable", documentation_workflow=workflow, question="question test",
         )
+
+# Ajout à tests/services/test_mail_documentation_pipeline.py
+
+def test_fichier_client_transmis_a_la_documentation_est_bien_celui_detecte(monkeypatch):
+    """Équivalent fichier de test_client_transmis_a_la_documentation_est_bien_celui_detecte."""
+    ticket_attendu = Ticket()
+
+    monkeypatch.setattr(router_service, "detecter_client", lambda texte: "AXE_ESANTE")
+    monkeypatch.setattr(
+        router_service, "traiter_fichier_complet",
+        lambda texte, fichier=None, client_force=None: ticket_attendu,
+    )
+
+    workflow = _workflow_reel_avec_reponse("AXE_ESANTE", "question test", "reponse AXE_ESANTE reelle")
+
+    resultat = mail_documentation_pipeline.traiter_fichier_avec_documentation(
+        texte_mail="mail quelconque", documentation_workflow=workflow, question="question test",
+        fichier="fichier_bidon.xlsx",
+    )
+
+    assert "reponse AXE_ESANTE reelle" in resultat.intervention.commentaire_interne
+
+
+def test_fichier_est_bien_transmis_a_traiter_fichier_complet(monkeypatch):
+    """Vérifie que le paramètre fichier est bien propagé, pas perdu en chemin."""
+    ticket_attendu = Ticket()
+    appelle_avec = {}
+
+    def fake_traiter_fichier_complet(texte, fichier=None, client_force=None):
+        appelle_avec["fichier"] = fichier
+        return ticket_attendu
+
+    monkeypatch.setattr(router_service, "detecter_client", lambda texte: "ETAM")
+    monkeypatch.setattr(router_service, "traiter_fichier_complet", fake_traiter_fichier_complet)
+
+    workflow = _workflow_reel_avec_reponse("ETAM", "question test", "reponse ETAM")
+
+    mail_documentation_pipeline.traiter_fichier_avec_documentation(
+        texte_mail="mail quelconque", documentation_workflow=workflow, question="question test",
+        fichier="mon_fichier.xlsx",
+    )
+
+    assert appelle_avec["fichier"] == "mon_fichier.xlsx"
+
+
+def test_fichier_exception_traiter_fichier_complet_remonte(monkeypatch):
+    """AXE_ESANTE/ETAM lèvent ValueError si le fichier requis est absent (cas réel de router_service.py) -- doit remonter, pas être avalé."""
+    def fake_qui_echoue(texte, fichier=None, client_force=None):
+        raise ValueError("AXE E-SANTE nécessite la pièce jointe Excel.")
+
+    monkeypatch.setattr(router_service, "traiter_fichier_complet", fake_qui_echoue)
+
+    workflow = _workflow_reel_avec_reponse("AXE_ESANTE", "question test", "reponse")
+
+    with pytest.raises(ValueError, match="pièce jointe Excel"):
+        mail_documentation_pipeline.traiter_fichier_avec_documentation(
+            texte_mail="mail sans fichier", documentation_workflow=workflow, question="question test",
+        )
